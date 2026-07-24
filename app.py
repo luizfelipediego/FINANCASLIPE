@@ -38,7 +38,11 @@ try:
 except Exception:
     token_secret = None
 
-params = st.experimental_get_query_params()
+try:
+    params = st.experimental_get_query_params()
+except AttributeError:
+    # fallback se a função não existir no ambiente
+    params = {}
 if token_secret and params.get("create_admin") and params.get("create_admin")[0] == token_secret:
     st.warning("Modo único: criação/atualização de administrador. Remova este código após uso.")
     try:
