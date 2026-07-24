@@ -8,6 +8,14 @@ Interface construída em Streamlit. Toda a persistência é feita em SQLite (db.
 e as regras de negócio (parcelamento, competência de cartão, despesas fixas,
 reserva automática e orçamento por categoria) estão implementadas em db.py / utils.py.
 
+CORREÇÕES NESTA VERSÃO:
+- st.experimental_rerun() -> st.rerun() (API antiga removida nas versões recentes do Streamlit)
+- st.experimental_get_query_params() -> st.query_params (nova API)
+- Página "💳 Cartões" agora tem um seletor de Banco (selo colorido/emoji) — ver utils.BANCOS_EMOJI
+- (A causa raiz do ValueError em todas as páginas foi corrigida em db.py: os parâmetros de
+  SQL agora são sempre convertidos para tupla antes de conn.execute(), o que resolve a
+  incompatibilidade com o driver 'libsql' usado no backend Turso/nuvem.)
+
 Para executar:
     streamlit run app.py
 """
@@ -59,7 +67,7 @@ def show_auth_sidebar():
             st.sidebar.info("Conta: Administrador (não vê dados privados de outros usuários)")
         if st.sidebar.button("Sair"):
             st.session_state["user"] = None
-            st.experimental_rerun()
+            st.rerun()
     else:
         tab = st.sidebar.radio("Ação", ("Entrar", "Criar conta"), index=0)
         if tab == "Entrar":
@@ -70,7 +78,7 @@ def show_auth_sidebar():
                     u = db.authenticate_user(email, senha)
                     if u:
                         st.session_state["user"] = u
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.sidebar.error("Credenciais inválidas")
                 except Exception as e:
@@ -282,7 +290,7 @@ elif pagina == "📥 Receitas":
         if id_excluir and st.button("🗑️ Excluir receita selecionada"):
             db.delete_receita(id_excluir, user)
             st.success("Receita excluída.")
-            st.experimental_rerun()
+            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Página: DESPESAS
@@ -293,7 +301,11 @@ elif pagina == "📤 Despesas":
     categorias = db.list_categorias(user)
     cartoes = db.list_cartoes(user)
     nomes_categorias = {c["nome"]: c["id"] for c in categorias}
-    nomes_cartoes = {c["nome"]: c["id"] for c in cartoes}
+    # Rótulo do cartão exibido junto com o selo do banco (se cadastrado)
+    def _rotulo_cartao(c):
+        selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
+        return f"{selo} — {c['nome']}" if selo else c["nome"]
+    nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
 
     with st.form("form_despesa", clear_on_submit=True):
         c1, c2 = st.columns(2)
@@ -362,12 +374,12 @@ elif pagina == "📤 Despesas":
             if colx.button("🗑️ Excluir apenas esta parcela"):
                 db.delete_despesa(id_excluir, user)
                 st.success("Parcela excluída.")
-                st.experimental_rerun()
+                st.rerun()
             grupo = df.loc[df["id"] == id_excluir, "compra_grupo"].values[0]
             if coly.button("🗑️ Excluir TODAS as parcelas desta compra"):
                 db.delete_grupo(grupo, user)
                 st.success("Todas as parcelas da compra foram excluídas.")
-                st.experimental_rerun()
+                st.rerun()
 
 # ---------------------------------------------------------------------------
 # Página: DESPESAS FIXAS
@@ -379,7 +391,10 @@ elif pagina == "🔁 Despesas Fixas":
     categorias = db.list_categorias(user)
     cartoes = db.list_cartoes(user)
     nomes_categorias = {c["nome"]: c["id"] for c in categorias}
-    nomes_cartoes = {c["nome"]: c["id"] for c in cartoes}
+    def _rotulo_cartao_fixa(c):
+        selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
+        return f"{selo} — {c['nome']}" if selo else c["nome"]
+    nomes_cartoes = {_rotulo_cartao_fixa(c): c["id"] for c in cartoes}
 
     with st.form("form_fixa", clear_on_submit=True):
         c1, c2 = st.columns(2)
@@ -424,10 +439,10 @@ elif pagina == "🔁 Despesas Fixas":
         if col2.button("⏸️ Pausar / ▶️ Reativar"):
             atual = df_fixas.loc[df_fixas["id"] == id_alvo, "ativa"].values[0]
             db.set_despesa_fixa_ativa(id_alvo, not atual, user)
-            st.experimental_rerun()
+            st.rerun()
         if col3.button("🗑️ Excluir cadastro"):
             db.delete_despesa_fixa(id_alvo, user)
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("---")
     st.subheader(f"Gerar lançamentos do mês selecionado ({utils.MESES_PT[mes_sel]}/{ano_sel})")
@@ -445,20 +460,28 @@ elif pagina == "🔁 Despesas Fixas":
 # ---------------------------------------------------------------------------
 elif pagina == "💳 Cartões":
     st.title("💳 Gestão de Cartões de Crédito")
+    st.caption(
+        "O selo abaixo (emoji colorido) é apenas uma identificação visual — não reproduz "
+        "a logomarca oficial de nenhum banco, já que são marcas registradas."
+    )
 
     with st.form("form_cartao", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        nome = c1.text_input("Nome do cartão (ex: Nubank, Inter)")
-        dia_fechamento = c2.number_input("Dia de fechamento da fatura", min_value=1, max_value=28, value=25)
-        dia_vencimento = c3.number_input("Dia de vencimento da fatura", min_value=1, max_value=28, value=5)
+        c1, c2 = st.columns(2)
+        banco = c1.selectbox("Banco / Instituição", list(utils.BANCOS_EMOJI.keys()),
+                              format_func=lambda b: utils.BANCOS_EMOJI[b])
+        nome = c2.text_input("Apelido do cartão (ex: Nubank Roxinho, Itaú Platinum)")
+
+        c3, c4 = st.columns(2)
+        dia_fechamento = c3.number_input("Dia de fechamento da fatura", min_value=1, max_value=28, value=25)
+        dia_vencimento = c4.number_input("Dia de vencimento da fatura", min_value=1, max_value=28, value=5)
         enviado = st.form_submit_button("➕ Cadastrar Cartão")
         if enviado:
             if not nome.strip():
-                st.error("Informe o nome do cartão.")
+                st.error("Informe o apelido do cartão.")
             else:
                 try:
-                    db.add_cartao(nome, dia_fechamento, dia_vencimento, user_id=user.get("id"))
-                    st.success("Cartão cadastrado!")
+                    db.add_cartao(nome, dia_fechamento, dia_vencimento, banco=banco, user_id=user.get("id"))
+                    st.success(f"Cartão {utils.BANCOS_EMOJI[banco]} cadastrado!")
                 except Exception:
                     st.error("Já existe um cartão com esse nome.")
 
@@ -467,14 +490,16 @@ elif pagina == "💳 Cartões":
     if not cartoes:
         st.info("Nenhum cartão cadastrado ainda.")
     else:
-        df = pd.DataFrame([dict(c) for c in cartoes])
-        df.columns = ["ID", "Nome", "Dia Fechamento", "Dia Vencimento"]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        df = utils.cartoes_para_dataframe(cartoes)
+        df_show = df.copy()
+        df_show["banco"] = df_show["banco"].apply(lambda b: utils.BANCOS_EMOJI.get(b, b or "—"))
+        df_show.columns = ["ID", "Banco", "Nome", "Dia Fechamento", "Dia Vencimento"]
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
 
         id_excluir = st.selectbox("Excluir cartão (ID)", [None] + [c["id"] for c in cartoes])
         if id_excluir and st.button("🗑️ Excluir cartão"):
             db.delete_cartao(id_excluir, user)
-            st.experimental_rerun()
+            st.rerun()
 
         st.info(
             "📌 **Regra de fechamento:** compras feitas *após* o dia de fechamento têm a "
@@ -514,13 +539,13 @@ elif pagina == "🏷️ Categorias e Orçamento":
         if col3.button("Salvar", key=f"salvar_{cat['id']}"):
             db.update_categoria_teto(cat["id"], novo_teto, requesting_user=user)
             st.success(f"Teto de {cat['nome']} atualizado!")
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("---")
     id_excluir = st.selectbox("Excluir categoria (ID)", [None] + [c["id"] for c in categorias])
     if id_excluir and st.button("🗑️ Excluir categoria selecionada"):
         db.delete_categoria(id_excluir, requesting_user=user)
-        st.experimental_rerun()
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Página: RELATÓRIOS E EXPORTAÇÃO
@@ -607,36 +632,28 @@ elif pagina == "⚙️ Configurações":
     st.markdown("---")
     st.subheader("ℹ️ Sobre o sistema")
     st.write(
-        "Sistema de Gestão Financeira Pessoal e Familiar — versão 1.1\n\n"
+        "Sistema de Gestão Financeira Pessoal e Familiar — versão 1.2\n\n"
         "- Modo local: SQLite (`financas.db`) na sua máquina.\n"
         "- Modo nuvem: Turso (compatível com SQLite), sem perda de dados em reinícios.\n"
         "- O sistema alterna automaticamente entre os dois, dependendo das credenciais configuradas."
     )
 
 # ---------------------------------------------------------------------------
+# Pequena util para JSON seguro (evitar crash)
+# ---------------------------------------------------------------------------
+def json_safe(s):
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        return s
+
+# ---------------------------------------------------------------------------
 # Admin (visível somente se is_admin True) - admins NÃO veem dados privados de outros usuários
 # ---------------------------------------------------------------------------
-# (Adicionada ao final: acessível na aba Admin criada no menu se você preferir separar)
-if pagina == "Admin" or pagina == "Admin (legacy)":
-    # placeholder if you change menu; kept for compatibility
-    pass
-
-# Adicionar aba Admin no final do arquivo para ser consistente com UI original
-if True:
-    # Exibir área administrativa numa seção separada (acessível pelo menu "Admin" que foi incluído no topo)
-    # No nosso menu, Admin está embutido como a última opção. Para compatibilidade visual, replicamos a lógica:
-    if pagina == "⚙️ Configurações":
-        # já exibe configurações; admin área fica em seu próprio menu no código anterior
-        pass
-
-# Na sua versão original o Admin era a última aba; aqui implementamos uma seção abaixo:
-# (para exibir logs e criar usuários — apenas administradores)
-if pagina == "📁 Relatórios e Exportação" and False:
-    pass  # placeholder
-
-# Para simplicidade, adicionamos uma forma de acessar Admin via query param se necessário:
-if st.experimental_get_query_params().get("admin") or (hasattr(user, "get") and user.get("is_admin")):
-    # mostrar seção administrativa abaixo (apenas se admin)
+query_params = st.query_params
+if query_params.get("admin") or (hasattr(user, "get") and user.get("is_admin")):
     if user.get("is_admin"):
         st.markdown("---")
         st.header("Admin — Gestão de Usuários e Auditoria (Apenas emails e logs são mostrados)")
@@ -664,14 +681,3 @@ if st.experimental_get_query_params().get("admin") or (hasattr(user, "get") and 
                 st.write("user_id:", L.get("user_id"), "row_id:", L.get("row_id"))
                 st.write("before:", before)
                 st.write("after:", after)
-
-# -------------------------
-# Pequena util para JSON seguro (evitar crash)
-# -------------------------
-def json_safe(s):
-    if not s:
-        return None
-    try:
-        return json.loads(s)
-    except Exception:
-        return s
