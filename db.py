@@ -901,3 +901,49 @@ if __name__ == "__main__":
     print("Inicializando/checando DB...")
     init_db()
     print("OK")
+def execute(sql: str, params=()) -> None:
+    params = tuple(params) if params is not None else ()
+    with _cursor() as (cur, conn):
+        cur.execute(sql, params)
+
+
+def fetch_one(sql: str, params=()) -> Optional[dict]:
+    params = tuple(params) if params is not None else ()
+    with _cursor() as (cur, conn):
+        row = cur.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+
+def fetch_all(sql: str, params=()) -> list[dict]:
+    params = tuple(params) if params is not None else ()
+    with _cursor() as (cur, conn):
+        rows = cur.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _ensure_column(table: str, column: str, ddl: str) -> None:
+    cols = fetch_all(f'PRAGMA table_info({table})')
+    if not any(c.get('name') == column for c in cols):
+        try:
+            execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+        except Exception:
+            pass
+
+
+def init_db() -> None:
+    execute("""
+    CREATE TABLE IF NOT EXISTS usuarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        is_verified INTEGER NOT NULL DEFAULT 0,
+        verification_token TEXT,
+        verification_otp TEXT,
+        verification_expires_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """)
+
+    execute("""
+    CREATE TABLE IF NOT EXISTS dados_particulares (
+        id INTEGER
