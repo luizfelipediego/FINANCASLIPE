@@ -24,10 +24,12 @@ Alterações da versão anterior (mantidas):
 """
 
 import os
+import sys
 import sqlite3
 import uuid
 import calendar
 import json
+import traceback
 from datetime import date, datetime
 from shutil import copy2
 
@@ -92,20 +94,59 @@ def _erro_de_stream_expirado(exc: Exception) -> bool:
 
 
 def _params_para_tupla(params):
-    """
-    Normaliza os parâmetros de uma query SEMPRE para tupla.
-
-    Motivo: o driver 'libsql' (backend Turso/nuvem) é mais rígido que o sqlite3
-    padrão e pode lançar ValueError quando recebe uma lista (list) no lugar de
-    uma tupla (tuple) como parâmetros de bind. O sqlite3 local aceita ambos,
-    mas para manter os dois backends 100% compatíveis, tudo é convertido aqui.
-    """
+    """Normaliza os parâmetros de uma query para tupla (formato mais universal)."""
     if params is None:
         return ()
     if isinstance(params, tuple):
         return params
-    # list, dict-values, generator, etc.
     return tuple(params)
+
+
+def _log_erro_diagnostico(sql, params, tentativa_formato, exc):
+    """
+    Registra no console (stdout/stderr) todos os detalhes do erro.
+    Isso aparece nos LOGS do Streamlit Cloud (botão 'Manage app' -> 'Logs'),
+    mesmo quando a interface mostra a mensagem redigida/oculta por segurança.
+    """
+    print("=" * 80, file=sys.stderr)
+    print("[DB DEBUG] Falha ao executar SQL", file=sys.stderr)
+    print(f"[DB DEBUG] SQL: {sql}", file=sys.stderr)
+    print(f"[DB DEBUG] Params ({tentativa_formato}): {params!r}", file=sys.stderr)
+    print(f"[DB DEBUG] Tipos dos params: {[type(p).__name__ for p in params] if params else '[]'}", file=sys.stderr)
+    print(f"[DB DEBUG] Backend em nuvem (Turso)? {usando_banco_em_nuvem()}", file=sys.stderr)
+    print(f"[DB DEBUG] Exceção: {type(exc).__name__}: {exc}", file=sys.stderr)
+    print(traceback.format_exc(), file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+
+
+def _executar_com_fallback(conn, sql, params):
+    """
+    Executa a query tentando, em ordem, os formatos de parâmetro mais comuns
+    aceitos por diferentes drivers (sqlite3 local e libsql/Turso na nuvem):
+      1) params como tupla (padrão)
+      2) params como lista
+      3) sem nenhum parâmetro (quando a tupla está vazia)
+    Se todas as tentativas falharem, relança a ÚLTIMA exceção capturada,
+    após registrar detalhes de diagnóstico nos logs do servidor.
+    """
+    params = _params_para_tupla(params)
+
+    tentativas = [("tupla", params)]
+    tentativas.append(("lista", list(params)))
+    if len(params) == 0:
+        tentativas.append(("sem_params", None))
+
+    ultima_excecao = None
+    for nome_formato, params_tentativa in tentativas:
+        try:
+            if params_tentativa is None:
+                return conn.execute(sql)
+            return conn.execute(sql, params_tentativa)
+        except Exception as e:
+            ultima_excecao = e
+            _log_erro_diagnostico(sql, params, nome_formato, e)
+            continue
+    raise ultima_excecao
 
 
 # ---------------------------------------------------------------------------
@@ -132,12 +173,11 @@ def _row_to_dict(cursor, row):
 
 def execute(sql: str, params=()):
     """Executa um INSERT/UPDATE/DELETE isolado (não retorna dados)."""
-    params = _params_para_tupla(params)
     ultima_excecao = None
     for tentativa in range(2):
         conn = _nova_conexao()
         try:
-            conn.execute(sql, params)
+            _executar_com_fallback(conn, sql, params)
             conn.commit()
             return
         except Exception as e:
@@ -152,12 +192,11 @@ def execute(sql: str, params=()):
 
 def fetch_all(sql: str, params=()) -> list:
     """Executa um SELECT isolado e retorna uma lista de dicts."""
-    params = _params_para_tupla(params)
     ultima_excecao = None
     for tentativa in range(2):
         conn = _nova_conexao()
         try:
-            cur = conn.execute(sql, params)
+            cur = _executar_com_fallback(conn, sql, params)
             return _rows_to_dicts(cur, cur.fetchall())
         except Exception as e:
             ultima_excecao = e
@@ -171,12 +210,11 @@ def fetch_all(sql: str, params=()) -> list:
 
 def fetch_one(sql: str, params=()):
     """Executa um SELECT isolado e retorna um único dict (ou None)."""
-    params = _params_para_tupla(params)
     ultima_excecao = None
     for tentativa in range(2):
         conn = _nova_conexao()
         try:
-            cur = conn.execute(sql, params)
+            cur = _executar_com_fallback(conn, sql, params)
             return _row_to_dict(cur, cur.fetchone())
         except Exception as e:
             ultima_excecao = e
