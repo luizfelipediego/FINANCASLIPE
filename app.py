@@ -28,6 +28,30 @@ import utils
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="Gestão Financeira Familiar", page_icon="💰", layout="wide")
+# --- INÍCIO: TRECHO TEMPORÁRIO PARA CRIAR ADMIN (REMOVER APÓS USAR) ---
+import streamlit as st
+
+# Apenas se você configurar o secret CREATE_ADMIN_TOKEN no Streamlit,
+# a criação será executada quando a URL for acessada com ?create_admin=SEU_TOKEN
+try:
+    token_secret = st.secrets["CREATE_ADMIN_TOKEN"]
+except Exception:
+    token_secret = None
+
+params = st.experimental_get_query_params()
+if token_secret and params.get("create_admin") and params.get("create_admin")[0] == token_secret:
+    st.warning("Modo único: criação/atualização de administrador. Remova este código após uso.")
+    try:
+        # importa e inicializa o DB (garante tabelas)
+        from db import init_db, create_initial_admin
+        init_db()
+        # cria/atualiza o admin com o email e senha fornecidos abaixo
+        create_initial_admin("luizfelipe.paiva1@gmail.com", "Euevoce2012", send_email_flag=False)
+        st.success("Administrador criado/atualizado com sucesso. REMOVA este bloco de código do app.py e remova o secret CREATE_ADMIN_TOKEN.")
+    except Exception as e:
+        st.error("Falha ao criar administrador: " + str(e))
+    st.stop()
+# --- FIM: TRECHO TEMPORÁRIO PARA CRIAR ADMIN (REMOVER APÓS USAR) ---
 db.init_db()
 
 FORMAS_PAGAMENTO = ["PIX", "Cartão de Crédito", "Cartão de Débito", "Dinheiro", "Transferência"]
