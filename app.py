@@ -741,4 +741,4 @@ def auth_page():
         with st.form('register_form'):
             email = st.text_input('E-mail para cadastro')
             senha = st.text_input('Senha', type='password')
-            senha2 = st.text_input('Confirmar senha', type='password
+            senha2 = st.text_input('Confirmar senha', type='password')
