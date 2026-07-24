@@ -4,7 +4,15 @@ db.py
 =====
 Camada de acesso a dados do Sistema de Gestão Financeira Pessoal e Familiar.
 
-Alterações principais adicionadas:
+CORREÇÕES NESTA VERSÃO:
+- execute()/fetch_all()/fetch_one() agora SEMPRE convertem params para tupla
+  antes de chamar conn.execute(). O driver 'libsql' (usado no backend Turso/nuvem)
+  é mais rígido que o sqlite3 padrão e lança ValueError quando recebe uma lista
+  no lugar de uma tupla — essa era a causa do erro em todas as páginas.
+- Adicionada coluna 'banco' na tabela cartoes (migração automática e segura).
+- add_cartao() agora aceita o parâmetro 'banco'.
+
+Alterações da versão anterior (mantidas):
 - Tabela users para login (email + password_hash + is_admin).
 - Proteção: admins NÃO podem ver dados pessoais/financeiros de outros usuários por padrão.
 - audit_logs para histórico (before/after em JSON).
@@ -13,7 +21,6 @@ Alterações principais adicionadas:
 - Funções de edição/exclusão que gravam audit_logs.
 - Backup local simples do arquivo SQLite.
 - Envio de e-mail opcional (SMTP) para notificações (configurar variáveis de ambiente).
-- Observação: mantenho compatibilidade com modo Turso (nuvem) do seu código original.
 """
 
 import os
@@ -84,6 +91,23 @@ def _erro_de_stream_expirado(exc: Exception) -> bool:
     return "stream not found" in msg or "stream_not_found" in msg or ("hrana" in msg and "404" in msg)
 
 
+def _params_para_tupla(params):
+    """
+    Normaliza os parâmetros de uma query SEMPRE para tupla.
+
+    Motivo: o driver 'libsql' (backend Turso/nuvem) é mais rígido que o sqlite3
+    padrão e pode lançar ValueError quando recebe uma lista (list) no lugar de
+    uma tupla (tuple) como parâmetros de bind. O sqlite3 local aceita ambos,
+    mas para manter os dois backends 100% compatíveis, tudo é convertido aqui.
+    """
+    if params is None:
+        return ()
+    if isinstance(params, tuple):
+        return params
+    # list, dict-values, generator, etc.
+    return tuple(params)
+
+
 # ---------------------------------------------------------------------------
 # Helpers para converter resultados de query em dicionários
 # ---------------------------------------------------------------------------
@@ -108,6 +132,7 @@ def _row_to_dict(cursor, row):
 
 def execute(sql: str, params=()):
     """Executa um INSERT/UPDATE/DELETE isolado (não retorna dados)."""
+    params = _params_para_tupla(params)
     ultima_excecao = None
     for tentativa in range(2):
         conn = _nova_conexao()
@@ -127,6 +152,7 @@ def execute(sql: str, params=()):
 
 def fetch_all(sql: str, params=()) -> list:
     """Executa um SELECT isolado e retorna uma lista de dicts."""
+    params = _params_para_tupla(params)
     ultima_excecao = None
     for tentativa in range(2):
         conn = _nova_conexao()
@@ -145,6 +171,7 @@ def fetch_all(sql: str, params=()) -> list:
 
 def fetch_one(sql: str, params=()):
     """Executa um SELECT isolado e retorna um único dict (ou None)."""
+    params = _params_para_tupla(params)
     ultima_excecao = None
     for tentativa in range(2):
         conn = _nova_conexao()
@@ -239,8 +266,27 @@ def send_email(to_email: str, subject: str, body: str):
 
 
 # ---------------------------------------------------------------------------
-# Inicialização do schema (adiciona users, audit_logs e colunas user_id)
+# Inicialização do schema (adiciona users, audit_logs, colunas user_id e banco)
 # ---------------------------------------------------------------------------
+
+def _coluna_existe(tabela: str, coluna: str) -> bool:
+    """Verifica se uma coluna já existe em uma tabela (via PRAGMA table_info)."""
+    try:
+        info = fetch_all(f"PRAGMA table_info({tabela})")
+        return any(c.get("name") == coluna for c in info)
+    except Exception:
+        return False
+
+
+def _garantir_coluna(tabela: str, coluna: str, definicao_sql: str):
+    """Adiciona uma coluna à tabela caso ela ainda não exista (migração segura)."""
+    if not _coluna_existe(tabela, coluna):
+        try:
+            execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {definicao_sql}")
+        except Exception:
+            # Se outra sessão já adicionou a coluna simultaneamente, ignora.
+            pass
+
 
 def init_db():
     """Cria todas as tabelas do sistema, caso ainda não existam (cada instrução isolada)."""
@@ -345,6 +391,9 @@ def init_db():
         timestamp TEXT DEFAULT (datetime('now'))
     )
     """)
+
+    # Migração: coluna 'banco' na tabela cartoes (para o seletor com emoji do banco)
+    _garantir_coluna("cartoes", "banco", "TEXT DEFAULT NULL")
 
     # Se o banco for novo, popula categorias padrão (sem user_id)
     total_categorias_row = fetch_one("SELECT COUNT(*) AS n FROM categorias")
@@ -486,9 +535,9 @@ def delete_categoria(categoria_id: int, requesting_user: dict):
 # Cartões de crédito (user-aware)
 # ---------------------------------------------------------------------------
 
-def add_cartao(nome: str, dia_fechamento: int, dia_vencimento: int, user_id: int = None):
-    execute("INSERT INTO cartoes (nome, dia_fechamento, dia_vencimento, user_id) VALUES (?, ?, ?, ?)",
-            (nome.strip(), dia_fechamento, dia_vencimento, user_id))
+def add_cartao(nome: str, dia_fechamento: int, dia_vencimento: int, banco: str = None, user_id: int = None):
+    execute("INSERT INTO cartoes (nome, dia_fechamento, dia_vencimento, banco, user_id) VALUES (?, ?, ?, ?, ?)",
+            (nome.strip(), dia_fechamento, dia_vencimento, banco, user_id))
 
 
 def list_cartoes(requesting_user: dict = None):
