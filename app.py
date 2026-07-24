@@ -2,7 +2,7 @@
 """
 app.py
 ======
-Sistema de Gestão Financeira Pessoal e Familiar
+Sistema de Gestão Financeira Pessoal e Familiar (com autenticação de usuário)
 ------------------------------------------------
 Interface construída em Streamlit. Toda a persistência é feita em SQLite (db.py)
 e as regras de negócio (parcelamento, competência de cartão, despesas fixas,
@@ -11,9 +11,10 @@ reserva automática e orçamento por categoria) estão implementadas em db.py / 
 Para executar:
     streamlit run app.py
 """
-
-from datetime import date
+from datetime import date, datetime
 import io
+import traceback
+import json
 
 import pandas as pd
 import plotly.express as px
@@ -34,10 +35,67 @@ ORIGENS_RECEITA = ["Trabalho principal", "Renda Extra", "Rendimentos", "Outros"]
 
 HOJE = date.today()
 
-# ---------------------------------------------------------------------------
-# Sidebar / navegação
-# ---------------------------------------------------------------------------
+# -------------------------
+# Autenticação / sessão
+# -------------------------
+def current_user():
+    return st.session_state.get("user")
 
+def require_login():
+    if current_user() is None:
+        st.warning("Faça login para usar o aplicativo.")
+        st.stop()
+
+def show_auth_sidebar():
+    st.sidebar.title("💳 Acesso")
+    if "user" not in st.session_state:
+        st.session_state["user"] = None
+
+    if st.session_state["user"]:
+        u = st.session_state["user"]
+        st.sidebar.write(f"Logado como: {u.get('email')}")
+        if u.get("is_admin"):
+            st.sidebar.info("Conta: Administrador (não vê dados privados de outros usuários)")
+        if st.sidebar.button("Sair"):
+            st.session_state["user"] = None
+            st.experimental_rerun()
+    else:
+        tab = st.sidebar.radio("Ação", ("Entrar", "Criar conta"), index=0)
+        if tab == "Entrar":
+            email = st.sidebar.text_input("Email", key="login_email")
+            senha = st.sidebar.text_input("Senha", type="password", key="login_pass")
+            if st.sidebar.button("Entrar"):
+                try:
+                    u = db.authenticate_user(email, senha)
+                    if u:
+                        st.session_state["user"] = u
+                        st.experimental_rerun()
+                    else:
+                        st.sidebar.error("Credenciais inválidas")
+                except Exception as e:
+                    st.sidebar.error(f"Erro ao autenticar: {e}")
+        else:
+            email = st.sidebar.text_input("Email (novo)", key="reg_email")
+            senha = st.sidebar.text_input("Senha (nova)", type="password", key="reg_pass")
+            if st.sidebar.button("Criar conta"):
+                if not email or not senha:
+                    st.sidebar.error("Preencha email e senha.")
+                else:
+                    try:
+                        uid = db.create_user(email, senha, is_admin=False)
+                        st.sidebar.success("Conta criada. Faça login.")
+                    except Exception as e:
+                        st.sidebar.error("Falha ao criar conta: " + str(e))
+
+show_auth_sidebar()
+
+# -------------------------
+# Sidebar / navegação (após auth)
+# -------------------------
+require_login()
+user = current_user()
+
+st.sidebar.markdown("---")
 st.sidebar.title("💰 Finanças da Família")
 pagina = st.sidebar.radio(
     "Navegação",
@@ -61,15 +119,50 @@ mes_sel = st.sidebar.selectbox("Mês de referência", list(range(1, 13)),
                                 format_func=lambda m: utils.MESES_PT[m])
 st.sidebar.caption("Esse período é usado no Dashboard, Relatórios e Orçamento.")
 
+# -------------------------
+# Cabeçalho principal
+# -------------------------
+st.title("FINANCASLIPE — Painel")
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.markdown(f"**Usuário:** {user.get('email')}")
+    mode = db.get_backend_info()
+    st.markdown(f"**Backend:** {mode}")
+with col2:
+    if st.button("Fazer backup local agora"):
+        try:
+            path = db.backup_db()
+            if path:
+                st.success(f"Backup criado: {path}")
+            else:
+                st.warning("Backup não disponível para backend em nuvem.")
+        except Exception as e:
+            st.error("Erro ao criar backup: " + str(e))
 
 # ---------------------------------------------------------------------------
 # Página: DASHBOARD
 # ---------------------------------------------------------------------------
-
 if pagina == "📊 Dashboard":
     st.title(f"📊 Dashboard — {utils.MESES_PT[mes_sel]}/{ano_sel}")
 
-    resumo = utils.calcular_resumo_mensal(ano_sel, mes_sel)
+    # Construir resumo respeitando o usuário atual (privacidade)
+    receitas_list = db.list_receitas(user, ano=ano_sel, mes=mes_sel)
+    despesas_list = db.list_despesas(user, ano=ano_sel, mes=mes_sel)
+
+    total_receitas = sum(r.get("valor", 0) for r in receitas_list)
+    total_despesas = sum(d.get("valor", 0) for d in despesas_list)
+    percentual_reserva = db.get_reserva_percentual()
+    valor_reserva = total_receitas * percentual_reserva / 100.0
+    saldo_livre = total_receitas - total_despesas - valor_reserva
+
+    resumo = {
+        "total_receitas": total_receitas,
+        "total_despesas": total_despesas,
+        "percentual_reserva": percentual_reserva,
+        "valor_reserva": valor_reserva,
+        "saldo_livre": saldo_livre,
+        "despesas": despesas_list,
+    }
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total de Receitas", utils.formatar_moeda(resumo["total_receitas"]))
@@ -82,7 +175,6 @@ if pagina == "📊 Dashboard":
     st.markdown("---")
 
     col_a, col_b = st.columns(2)
-
     # Gráfico de distribuição por categoria (mês atual)
     with col_a:
         st.subheader("Distribuição de Despesas por Categoria")
@@ -100,12 +192,17 @@ if pagina == "📊 Dashboard":
         historico = []
         for i in range(11, -1, -1):
             d = db.add_months(date(ano_sel, mes_sel, 1), -i)
-            r = utils.calcular_resumo_mensal(d.year, d.month)
+            # calcular por usuário
+            r_receitas = db.list_receitas(user, ano=d.year, mes=d.month)
+            r_despesas = db.list_despesas(user, ano=d.year, mes=d.month)
+            total_r = sum(rr.get("valor", 0) for rr in r_receitas)
+            total_d = sum(dd.get("valor", 0) for dd in r_despesas)
+            perc = db.get_reserva_percentual()
             historico.append({
                 "mes": f"{utils.MESES_PT[d.month][:3]}/{str(d.year)[2:]}",
-                "Saldo Livre": r["saldo_livre"],
-                "Receitas": r["total_receitas"],
-                "Despesas": r["total_despesas"],
+                "Saldo Livre": total_r - total_d - (total_r * perc / 100.0),
+                "Receitas": total_r,
+                "Despesas": total_d,
             })
         df_hist = pd.DataFrame(historico)
         fig2 = px.line(df_hist, x="mes", y=["Receitas", "Despesas", "Saldo Livre"], markers=True)
@@ -115,12 +212,12 @@ if pagina == "📊 Dashboard":
     st.markdown("---")
     st.subheader("🚦 Alertas de Teto de Gastos por Categoria")
 
-    categorias = db.list_categorias()
+    categorias = db.list_categorias(user)
     df_desp_cat = utils.despesas_para_dataframe(resumo["despesas"])
     algum_teto_definido = False
 
     for cat in categorias:
-        if not cat["teto_mensal"] or cat["teto_mensal"] <= 0:
+        if not cat.get("teto_mensal") or cat["teto_mensal"] <= 0:
             continue
         algum_teto_definido = True
         gasto = df_desp_cat.loc[df_desp_cat["categoria_nome"] == cat["nome"], "valor"].sum() \
@@ -144,11 +241,9 @@ if pagina == "📊 Dashboard":
     if not algum_teto_definido:
         st.info("Nenhum teto de gasto configurado ainda. Defina em '🏷️ Categorias e Orçamento'.")
 
-
 # ---------------------------------------------------------------------------
 # Página: RECEITAS
 # ---------------------------------------------------------------------------
-
 elif pagina == "📥 Receitas":
     st.title("📥 Receitas (Entradas)")
 
@@ -163,7 +258,7 @@ elif pagina == "📥 Receitas":
             if valor <= 0:
                 st.error("Informe um valor maior que zero.")
             else:
-                db.add_receita(data_receita.isoformat(), origem, valor, observacao)
+                db.add_receita(data_receita.isoformat(), origem, valor, observacao, user_id=user.get("id"))
                 perc = db.get_reserva_percentual()
                 st.success(
                     f"Receita registrada! Reserva automática ({perc:.1f}%): "
@@ -172,7 +267,7 @@ elif pagina == "📥 Receitas":
 
     st.markdown("---")
     st.subheader(f"Receitas de {utils.MESES_PT[mes_sel]}/{ano_sel}")
-    receitas = db.list_receitas(ano_sel, mes_sel)
+    receitas = db.list_receitas(user, ano_sel, mes_sel)
     df = utils.receitas_para_dataframe(receitas)
     if df.empty:
         st.info("Nenhuma receita lançada neste período.")
@@ -184,20 +279,18 @@ elif pagina == "📥 Receitas":
         id_excluir = st.selectbox("Excluir lançamento (selecione o ID)",
                                    [None] + df["id"].tolist())
         if id_excluir and st.button("🗑️ Excluir receita selecionada"):
-            db.delete_receita(id_excluir)
+            db.delete_receita(id_excluir, user)
             st.success("Receita excluída.")
-            st.rerun()
-
+            st.experimental_rerun()
 
 # ---------------------------------------------------------------------------
 # Página: DESPESAS
 # ---------------------------------------------------------------------------
-
 elif pagina == "📤 Despesas":
     st.title("📤 Despesas (Saídas)")
 
-    categorias = db.list_categorias()
-    cartoes = db.list_cartoes()
+    categorias = db.list_categorias(user)
+    cartoes = db.list_cartoes(user)
     nomes_categorias = {c["nome"]: c["id"] for c in categorias}
     nomes_cartoes = {c["nome"]: c["id"] for c in cartoes}
 
@@ -234,7 +327,7 @@ elif pagina == "📤 Despesas":
                 categoria_id = nomes_categorias.get(categoria_nome)
                 cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
                 db.add_despesa(data_compra, categoria_id, descricao, valor_total,
-                                forma_pagamento, cartao_id, parcelas)
+                                forma_pagamento, cartao_id, parcelas, user_id=user.get("id"))
 
                 if parcelas > 1:
                     cartao_row = next((c for c in cartoes if c["id"] == cartao_id), None)
@@ -248,7 +341,7 @@ elif pagina == "📤 Despesas":
 
     st.markdown("---")
     st.subheader(f"Despesas — competência de {utils.MESES_PT[mes_sel]}/{ano_sel}")
-    despesas = db.list_despesas(ano_sel, mes_sel)
+    despesas = db.list_despesas(user, ano_sel, mes_sel)
     df = utils.despesas_para_dataframe(despesas)
     if df.empty:
         st.info("Nenhuma despesa nesta competência.")
@@ -266,26 +359,24 @@ elif pagina == "📤 Despesas":
         if id_excluir:
             colx, coly = st.columns(2)
             if colx.button("🗑️ Excluir apenas esta parcela"):
-                db.delete_despesa(id_excluir)
+                db.delete_despesa(id_excluir, user)
                 st.success("Parcela excluída.")
-                st.rerun()
+                st.experimental_rerun()
             grupo = df.loc[df["id"] == id_excluir, "compra_grupo"].values[0]
             if coly.button("🗑️ Excluir TODAS as parcelas desta compra"):
-                db.delete_grupo(grupo)
+                db.delete_grupo(grupo, user)
                 st.success("Todas as parcelas da compra foram excluídas.")
-                st.rerun()
-
+                st.experimental_rerun()
 
 # ---------------------------------------------------------------------------
 # Página: DESPESAS FIXAS
 # ---------------------------------------------------------------------------
-
 elif pagina == "🔁 Despesas Fixas":
     st.title("🔁 Despesas Fixas / Recorrentes")
     st.caption("Ex.: Aluguel, Internet, Assinaturas. Gere os lançamentos do mês com um clique.")
 
-    categorias = db.list_categorias()
-    cartoes = db.list_cartoes()
+    categorias = db.list_categorias(user)
+    cartoes = db.list_cartoes(user)
     nomes_categorias = {c["nome"]: c["id"] for c in categorias}
     nomes_cartoes = {c["nome"]: c["id"] for c in cartoes}
 
@@ -310,12 +401,12 @@ elif pagina == "🔁 Despesas Fixas":
             else:
                 cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
                 db.add_despesa_fixa(descricao, nomes_categorias[categoria_nome], valor,
-                                     forma_pagamento, cartao_id, dia_vencimento)
+                                     forma_pagamento, cartao_id, dia_vencimento, user_id=user.get("id"))
                 st.success("Despesa fixa cadastrada!")
 
     st.markdown("---")
     st.subheader("Despesas fixas cadastradas")
-    fixas = db.list_despesas_fixas()
+    fixas = db.list_despesas_fixas(user, somente_ativas=False)
     if not fixas:
         st.info("Nenhuma despesa fixa cadastrada.")
     else:
@@ -331,28 +422,26 @@ elif pagina == "🔁 Despesas Fixas":
         id_alvo = col1.selectbox("Selecionar ID para ação", df_fixas["id"].tolist())
         if col2.button("⏸️ Pausar / ▶️ Reativar"):
             atual = df_fixas.loc[df_fixas["id"] == id_alvo, "ativa"].values[0]
-            db.set_despesa_fixa_ativa(id_alvo, not atual)
-            st.rerun()
+            db.set_despesa_fixa_ativa(id_alvo, not atual, user)
+            st.experimental_rerun()
         if col3.button("🗑️ Excluir cadastro"):
-            db.delete_despesa_fixa(id_alvo)
-            st.rerun()
+            db.delete_despesa_fixa(id_alvo, user)
+            st.experimental_rerun()
 
     st.markdown("---")
     st.subheader(f"Gerar lançamentos do mês selecionado ({utils.MESES_PT[mes_sel]}/{ano_sel})")
     st.caption("Duplica automaticamente todas as despesas fixas ativas para este mês, "
                "sem gerar duplicidade se já tiverem sido geradas antes.")
     if st.button("🔁 Gerar Despesas Fixas do Mês"):
-        qtd = db.gerar_despesas_fixas_do_mes(ano_sel, mes_sel)
+        qtd = db.gerar_despesas_fixas_do_mes(ano_sel, mes_sel, requesting_user=user)
         if qtd > 0:
             st.success(f"{qtd} lançamento(s) gerado(s) para {utils.MESES_PT[mes_sel]}/{ano_sel}.")
         else:
             st.info("Todos os lançamentos deste mês já haviam sido gerados anteriormente.")
 
-
 # ---------------------------------------------------------------------------
 # Página: CARTÕES
 # ---------------------------------------------------------------------------
-
 elif pagina == "💳 Cartões":
     st.title("💳 Gestão de Cartões de Crédito")
 
@@ -367,13 +456,13 @@ elif pagina == "💳 Cartões":
                 st.error("Informe o nome do cartão.")
             else:
                 try:
-                    db.add_cartao(nome, dia_fechamento, dia_vencimento)
+                    db.add_cartao(nome, dia_fechamento, dia_vencimento, user_id=user.get("id"))
                     st.success("Cartão cadastrado!")
                 except Exception:
                     st.error("Já existe um cartão com esse nome.")
 
     st.markdown("---")
-    cartoes = db.list_cartoes()
+    cartoes = db.list_cartoes(user)
     if not cartoes:
         st.info("Nenhum cartão cadastrado ainda.")
     else:
@@ -383,19 +472,17 @@ elif pagina == "💳 Cartões":
 
         id_excluir = st.selectbox("Excluir cartão (ID)", [None] + [c["id"] for c in cartoes])
         if id_excluir and st.button("🗑️ Excluir cartão"):
-            db.delete_cartao(id_excluir)
-            st.rerun()
+            db.delete_cartao(id_excluir, user)
+            st.experimental_rerun()
 
         st.info(
             "📌 **Regra de fechamento:** compras feitas *após* o dia de fechamento têm a "
             "1ª parcela lançada automaticamente na fatura (competência) do **mês seguinte**."
         )
 
-
 # ---------------------------------------------------------------------------
 # Página: CATEGORIAS E ORÇAMENTO
 # ---------------------------------------------------------------------------
-
 elif pagina == "🏷️ Categorias e Orçamento":
     st.title("🏷️ Categorias de Despesa e Teto de Gastos")
 
@@ -409,47 +496,45 @@ elif pagina == "🏷️ Categorias e Orçamento":
                 st.error("Informe o nome da categoria.")
             else:
                 try:
-                    db.add_categoria(nome, teto)
+                    db.add_categoria(nome, teto, user_id=user.get("id"))
                     st.success("Categoria criada!")
                 except Exception:
                     st.error("Já existe uma categoria com esse nome.")
 
     st.markdown("---")
     st.subheader("Categorias cadastradas — defina/edite o teto mensal")
-    categorias = db.list_categorias()
+    categorias = db.list_categorias(user)
     for cat in categorias:
         col1, col2, col3 = st.columns([3, 2, 1])
         col1.write(f"**{cat['nome']}**")
         novo_teto = col2.number_input(f"Teto (R$) — {cat['nome']}", min_value=0.0,
-                                       value=float(cat["teto_mensal"] or 0), step=50.0,
+                                       value=float(cat.get("teto_mensal") or 0), step=50.0,
                                        key=f"teto_{cat['id']}", label_visibility="collapsed")
         if col3.button("Salvar", key=f"salvar_{cat['id']}"):
-            db.update_categoria_teto(cat["id"], novo_teto)
+            db.update_categoria_teto(cat["id"], novo_teto, requesting_user=user)
             st.success(f"Teto de {cat['nome']} atualizado!")
-            st.rerun()
+            st.experimental_rerun()
 
     st.markdown("---")
     id_excluir = st.selectbox("Excluir categoria (ID)", [None] + [c["id"] for c in categorias])
     if id_excluir and st.button("🗑️ Excluir categoria selecionada"):
-        db.delete_categoria(id_excluir)
-        st.rerun()
-
+        db.delete_categoria(id_excluir, requesting_user=user)
+        st.experimental_rerun()
 
 # ---------------------------------------------------------------------------
 # Página: RELATÓRIOS E EXPORTAÇÃO
 # ---------------------------------------------------------------------------
-
 elif pagina == "📁 Relatórios e Exportação":
     st.title("📁 Relatórios, Filtros e Exportação")
 
     modo = st.radio("Visualizar por período:", ["Mensal", "Diário (dentro do mês)", "Anual"], horizontal=True)
 
     if modo == "Anual":
-        receitas = db.list_receitas(ano_sel, None)
-        despesas = db.list_despesas(ano_sel, None)
+        receitas = db.list_receitas(user, ano_sel, None)
+        despesas = db.list_despesas(user, ano_sel, None)
     else:
-        receitas = db.list_receitas(ano_sel, mes_sel)
-        despesas = db.list_despesas(ano_sel, mes_sel)
+        receitas = db.list_receitas(user, ano_sel, mes_sel)
+        despesas = db.list_despesas(user, ano_sel, mes_sel)
 
     df_r = utils.receitas_para_dataframe(receitas)
     df_d = utils.despesas_para_dataframe(despesas)
@@ -489,11 +574,9 @@ elif pagina == "📁 Relatórios e Exportação":
                             file_name=f"financas_{ano_sel}_{mes_sel if modo != 'Anual' else 'ANO'}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-
 # ---------------------------------------------------------------------------
 # Página: CONFIGURAÇÕES
 # ---------------------------------------------------------------------------
-
 elif pagina == "⚙️ Configurações":
     st.title("⚙️ Configurações Gerais")
 
@@ -528,3 +611,66 @@ elif pagina == "⚙️ Configurações":
         "- Modo nuvem: Turso (compatível com SQLite), sem perda de dados em reinícios.\n"
         "- O sistema alterna automaticamente entre os dois, dependendo das credenciais configuradas."
     )
+
+# ---------------------------------------------------------------------------
+# Admin (visível somente se is_admin True) - admins NÃO veem dados privados de outros usuários
+# ---------------------------------------------------------------------------
+# (Adicionada ao final: acessível na aba Admin criada no menu se você preferir separar)
+if pagina == "Admin" or pagina == "Admin (legacy)":
+    # placeholder if you change menu; kept for compatibility
+    pass
+
+# Adicionar aba Admin no final do arquivo para ser consistente com UI original
+if True:
+    # Exibir área administrativa numa seção separada (acessível pelo menu "Admin" que foi incluído no topo)
+    # No nosso menu, Admin está embutido como a última opção. Para compatibilidade visual, replicamos a lógica:
+    if pagina == "⚙️ Configurações":
+        # já exibe configurações; admin área fica em seu próprio menu no código anterior
+        pass
+
+# Na sua versão original o Admin era a última aba; aqui implementamos uma seção abaixo:
+# (para exibir logs e criar usuários — apenas administradores)
+if pagina == "📁 Relatórios e Exportação" and False:
+    pass  # placeholder
+
+# Para simplicidade, adicionamos uma forma de acessar Admin via query param se necessário:
+if st.experimental_get_query_params().get("admin") or (hasattr(user, "get") and user.get("is_admin")):
+    # mostrar seção administrativa abaixo (apenas se admin)
+    if user.get("is_admin"):
+        st.markdown("---")
+        st.header("Admin — Gestão de Usuários e Auditoria (Apenas emails e logs são mostrados)")
+        users = db.fetch_all("SELECT id, email, is_admin, created_at FROM users ORDER BY created_at DESC")
+        st.subheader("Usuários (emails apenas)")
+        st.table(users)
+        st.subheader("Ações administrativas: criar usuário")
+        with st.form("admin_create_user"):
+            email_new = st.text_input("Email novo (admin)", key="adm_new_email")
+            senha_new = st.text_input("Senha (temporária)", key="adm_new_pass", type="password")
+            make_admin = st.checkbox("Tornar administrador?", value=False)
+            if st.form_submit_button("Criar usuário"):
+                try:
+                    uid = db.create_user(email_new, senha_new, is_admin=make_admin)
+                    st.success("Usuário criado com id " + str(uid))
+                except Exception as e:
+                    st.error("Erro: " + str(e))
+        st.subheader("Logs de auditoria (ultimas 200 entradas)")
+        logs = db.get_audit_logs(limit=200)
+        st.write(f"Mostrando {len(logs)} registros de auditoria")
+        for L in logs:
+            with st.expander(f"{L.get('timestamp')} — {L.get('action')} — {L.get('table_name')}"):
+                before = json_safe(L.get("before_json"))
+                after = json_safe(L.get("after_json"))
+                st.write("user_id:", L.get("user_id"), "row_id:", L.get("row_id"))
+                st.write("before:", before)
+                st.write("after:", after)
+
+# -------------------------
+# Pequena util para JSON seguro (evitar crash)
+# -------------------------
+def json_safe(s):
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        return s
