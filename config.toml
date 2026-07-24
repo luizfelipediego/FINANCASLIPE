@@ -1,0 +1,7 @@
+[client]
+# Mostra a mensagem REAL do erro na tela (em vez do texto genérico
+# "This app has encountered an error... redacted to prevent data leaks").
+# IMPORTANTE: depois de descobrirmos e corrigirmos a causa raiz do bug do
+# Turso, é recomendável voltar isso para "type" ou remover o arquivo,
+# para não expor detalhes internos do banco em produção.
+showErrorDetails = "full"
