@@ -430,8 +430,42 @@ def init_db():
     )
     """)
 
-    # Migração: coluna 'banco' na tabela cartoes (para o seletor com emoji do banco)
+    # ---------------------------------------------------------------------
+    # MIGRAÇÃO CRÍTICA: adiciona colunas que podem não existir em bancos
+    # (principalmente no Turso/nuvem) criados ANTES da funcionalidade de
+    # login (user_id) e de outras evoluções do schema terem sido introduzidas.
+    # 'CREATE TABLE IF NOT EXISTS' NÃO adiciona colunas novas a uma tabela
+    # que já existe — por isso essas colunas precisam ser migradas aqui,
+    # uma a uma, de forma segura (idempotente).
+    # ---------------------------------------------------------------------
+    _garantir_coluna("categorias", "user_id", "INTEGER DEFAULT NULL")
+
+    _garantir_coluna("cartoes", "user_id", "INTEGER DEFAULT NULL")
     _garantir_coluna("cartoes", "banco", "TEXT DEFAULT NULL")
+
+    _garantir_coluna("receitas", "user_id", "INTEGER DEFAULT NULL")
+
+    _garantir_coluna("despesas_fixas", "user_id", "INTEGER DEFAULT NULL")
+    _garantir_coluna("despesas_fixas", "dia_vencimento", "INTEGER DEFAULT 1")
+    _garantir_coluna("despesas_fixas", "ativa", "INTEGER DEFAULT 1")
+
+    _garantir_coluna("despesas", "user_id", "INTEGER DEFAULT NULL")
+    _garantir_coluna("despesas", "data_competencia", "TEXT")
+    _garantir_coluna("despesas", "parcela_atual", "INTEGER DEFAULT 1")
+    _garantir_coluna("despesas", "parcela_total", "INTEGER DEFAULT 1")
+    _garantir_coluna("despesas", "compra_grupo", "TEXT")
+    _garantir_coluna("despesas", "fixa", "INTEGER DEFAULT 0")
+    _garantir_coluna("despesas", "fixa_origem_id", "INTEGER")
+
+    # Se 'despesas' tinha linhas antigas sem data_competencia preenchida,
+    # usa a própria data_compra como competência (evita quebrar filtros por mês).
+    try:
+        execute("""
+            UPDATE despesas SET data_competencia = data_compra
+            WHERE data_competencia IS NULL OR data_competencia = ''
+        """)
+    except Exception:
+        pass
 
     # Se o banco for novo, popula categorias padrão (sem user_id)
     total_categorias_row = fetch_one("SELECT COUNT(*) AS n FROM categorias")
