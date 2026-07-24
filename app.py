@@ -681,3 +681,64 @@ if query_params.get("admin") or (hasattr(user, "get") and user.get("is_admin")):
                 st.write("user_id:", L.get("user_id"), "row_id:", L.get("row_id"))
                 st.write("before:", before)
                 st.write("after:", after)
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from datetime import date
+
+import streamlit as st
+
+import db
+import utils
+
+st.set_page_config(page_title='Gestão Financeira Pessoal', page_icon='🔐', layout='wide')
+db.init_db()
+
+
+def init_state():
+    defaults = {'page': 'auth', 'user_id': None, 'user_email': None, 'pending_email': None}
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
+
+
+def logout():
+    for k in ['page', 'user_id', 'user_email', 'pending_email']:
+        st.session_state.pop(k, None)
+    st.rerun()
+
+
+def require_login():
+    if not st.session_state.get('user_id'):
+        st.info('Faça login para continuar.')
+        st.stop()
+
+
+def auth_page():
+    st.title('🔐 Acesso ao Sistema')
+    tab_login, tab_cadastro, tab_verificacao = st.tabs(['Entrar', 'Cadastrar', 'Verificar e-mail'])
+
+    with tab_login:
+        with st.form('login_form'):
+            email = st.text_input('E-mail')
+            senha = st.text_input('Senha', type='password')
+            submitted = st.form_submit_button('Entrar')
+        if submitted:
+            user = db.authenticate_verified_user(email, senha)
+            if user:
+                st.session_state['user_id'] = user['id']
+                st.session_state['user_email'] = user['email']
+                st.session_state['page'] = 'dashboard'
+                st.rerun()
+            else:
+                raw = db.verify_user_credentials(email, senha)
+                if raw and int(raw.get('is_verified') or 0) == 0:
+                    st.warning('Conta ainda não verificada. Use a aba de verificação.')
+                    st.session_state['pending_email'] = raw['email']
+                else:
+                    st.error('Credenciais inválidas.')
+
+    with tab_cadastro:
+        with st.form('register_form'):
+            email = st.text_input('E-mail para cadastro')
+            senha = st.text_input('Senha', type='password')
+            senha2 = st.text_input('Confirmar senha', type='password
