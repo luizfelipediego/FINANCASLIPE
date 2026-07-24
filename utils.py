@@ -115,3 +115,79 @@ def cor_status_teto(percentual: float) -> str:
         return "#f39c12"   # laranja
     else:
         return "#2ecc71"   # verde
+# -*- coding: utf-8 -*-
+"""
+utils.py
+========
+Funções auxiliares de segurança e e-mail para autenticação.
+"""
+from __future__ import annotations
+
+import os
+import secrets
+import smtplib
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+
+try:
+    import bcrypt
+except Exception:
+    bcrypt = None
+
+TOKEN_TTL_MINUTES = 30
+OTP_DIGITS = 6
+
+
+def _secret(key: str, default=None):
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
+def hash_password(password: str) -> str:
+    if bcrypt is None:
+        raise RuntimeError('bcrypt não instalado. Instale com pip install bcrypt')
+    if not password:
+        raise ValueError('Senha vazia')
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    if bcrypt is None:
+        raise RuntimeError('bcrypt não instalado. Instale com pip install bcrypt')
+    if not password or not password_hash:
+        return False
+    return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+
+
+def generate_verification_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def generate_otp() -> str:
+    return ''.join(secrets.choice('0123456789') for _ in range(OTP_DIGITS))
+
+
+def token_expires_at(minutes: int = TOKEN_TTL_MINUTES) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def is_token_expired(expires_at: str | None) -> bool:
+    if not expires_at:
+        return True
+    try:
+        dt = datetime.fromisoformat(expires_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) >= dt
+    except Exception:
+        return True
+
+
+def send_email(to_email: str, subject: str, body: str) -> None:
+    host = _secret('SMTP_HOST')
+    port = int(_secret('SMTP_PORT', 58
