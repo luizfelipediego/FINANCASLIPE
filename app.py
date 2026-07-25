@@ -253,6 +253,17 @@ TEMPLATE_REDEFINIR = """
 """
 
 # ============================================================
+# FUNCAO HELPER PARA RENDERIZAR TEMPLATES
+# ============================================================
+def _render(template_content, titulo, **kwargs):
+    """Renderiza um template filho dentro do template base."""
+    start = template_content.find('{% block content %}') + len('{% block content %}')
+    end = template_content.find('{% endblock %}')
+    block_content = template_content[start:end]
+    full_template = TEMPLATE_BASE.replace('{% block content %}{% endblock %}', block_content)
+    return render_template_string(full_template, titulo=titulo, **kwargs)
+
+# ============================================================
 # ROTAS
 # ============================================================
 @app.route("/")
@@ -287,19 +298,7 @@ def cadastro():
             return redirect(url_for("cadastro"))
         finally:
             conn.close()
-    return render_template_string(TEMPLATE_BASE.replace('{% block content %}{% endblock %}', '{% block content %}{% endblock %}'),
-                                  titulo="Cadastro", base=TEMPLATE_BASE) if False else            render_template_string(TEMPLATE_CADASTRO.replace('extends "base"', 'extends TEMPLATE_BASE') if False else
-                                  TEMPLATE_CADASTRO, titulo="Cadastro", TEMPLATE_BASE=TEMPLATE_BASE) if False else            render_template_string(TEMPLATE_BASE, titulo="Cadastro").replace('{% block content %}{% endblock %}', '')            if False else _render(TEMPLATE_CADASTRO, "Cadastro")
-
-def _render(template_content, titulo):
-    """Renderiza um template filho dentro do template base."""
-    # Substitui o bloco content do base pelo conteudo do template filho
-    # Extrai o conteudo dentro de {% block content %} ... {% endblock %}
-    start = template_content.find('{% block content %}') + len('{% block content %}')
-    end = template_content.find('{% endblock %}')
-    block_content = template_content[start:end]
-    full_template = TEMPLATE_BASE.replace('{% block content %}{% endblock %}', block_content)
-    return render_template_string(full_template, titulo=titulo)
+    return _render(TEMPLATE_CADASTRO, "Cadastro")
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -326,7 +325,7 @@ def dashboard():
     if "usuario_id" not in session:
         flash("Voce precisa estar logado.", "danger")
         return redirect(url_for("login"))
-    return _render(TEMPLATE_DASHBOARD, "Dashboard")
+    return _render(TEMPLATE_DASHBOARD, "Dashboard", usuario_id=session.get("usuario_id"), usuario_login=session.get("usuario_login"))
 
 @app.route("/logout")
 def logout():
@@ -344,15 +343,7 @@ def admin():
     cursor.execute("SELECT id, login, email, data_cadastro FROM usuarios ORDER BY id")
     usuarios = cursor.fetchall()
     conn.close()
-    return _render(TEMPLATE_ADMIN.replace('{% extends "base" %}', '') if False else
-                   TEMPLATE_ADMIN, "Admin") if False else _render_admin(usuarios)
-
-def _render_admin(usuarios):
-    start = TEMPLATE_ADMIN.find('{% block content %}') + len('{% block content %}')
-    end = TEMPLATE_ADMIN.find('{% endblock %}')
-    block_content = TEMPLATE_ADMIN[start:end]
-    full_template = TEMPLATE_BASE.replace('{% block content %}{% endblock %}', block_content)
-    return render_template_string(full_template, titulo="Admin", usuarios=usuarios)
+    return _render(TEMPLATE_ADMIN, "Admin", usuarios=usuarios)
 
 @app.route("/admin/reset/<int:user_id>", methods=["POST"])
 def admin_reset(user_id):
@@ -446,11 +437,7 @@ def redefinir(token):
         flash("Senha redefinida com sucesso! Faca login.", "success")
         return redirect(url_for("login"))
     conn.close()
-    start = TEMPLATE_REDEFINIR.find('{% block content %}') + len('{% block content %}')
-    end = TEMPLATE_REDEFINIR.find('{% endblock %}')
-    block_content = TEMPLATE_REDEFINIR[start:end]
-    full_template = TEMPLATE_BASE.replace('{% block content %}{% endblock %}', block_content)
-    return render_template_string(full_template, titulo="Redefinir Senha", token=token)
+    return _render(TEMPLATE_REDEFINIR, "Redefinir Senha", token=token)
 
 # ============================================================
 # CRIAR USUARIO ADMIN PADRAO (executar uma vez)
