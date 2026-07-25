@@ -1,4 +1,0 @@
-flask==3.0.0
-flask-bcrypt==1.0.1
-bcrypt==4.1.2
-werkzeug==3.0.1
