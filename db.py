@@ -468,17 +468,38 @@ def init_db():
     except Exception:
         pass
 
-    # Se o banco for novo, popula categorias padrão (sem user_id)
-    total_categorias_row = fetch_one("SELECT COUNT(*) AS n FROM categorias")
-    total_categorias = total_categorias_row["n"] if total_categorias_row else 0
-    if total_categorias == 0:
-        padrao = ["Mercado", "Saúde/Remédios", "Estudos/Educação",
-                  "Lazer", "Moradia", "Veículo", "Outros"]
-        for nome in padrao:
-            execute("INSERT INTO categorias (nome, teto_mensal) VALUES (?, 0)", (nome,))
+    # ---------------------------------------------------------------------
+    # SEPARAÇÃO TOTAL POR CONTA: cada usuário tem seu próprio conjunto de
+    # categorias padrão (cópia privada, não mais um registro global
+    # compartilhado com user_id NULL). Isso garante que cada conta tenha seu
+    # próprio dashboard/orçamento, sem interferir nos dados de outra conta,
+    # e evita o erro de permissão ao tentar editar o teto de uma categoria
+    # "global" que não pertencia a ninguém.
+    # Usuários já existentes que ainda não têm nenhuma categoria própria
+    # recebem o conjunto padrão automaticamente (migração idempotente).
+    # ---------------------------------------------------------------------
+    for u in fetch_all("SELECT id FROM users"):
+        seed_categorias_padrao(u["id"])
 
     # Garante diretório de backups
     ensure_backup_dir()
+
+
+CATEGORIAS_PADRAO = ["Mercado", "Saúde/Remédios", "Estudos/Educação",
+                     "Lazer", "Moradia", "Veículo", "Outros"]
+
+
+def seed_categorias_padrao(user_id: int):
+    """
+    Garante que o usuário informado tenha seu próprio conjunto de categorias
+    padrão. Não faz nada se o usuário já tiver ao menos uma categoria própria
+    cadastrada (evita duplicar toda vez que o app reinicia).
+    """
+    total = fetch_one("SELECT COUNT(*) AS n FROM categorias WHERE user_id = ?", (user_id,))
+    if total and total["n"] > 0:
+        return
+    for nome in CATEGORIAS_PADRAO:
+        execute("INSERT INTO categorias (nome, teto_mensal, user_id) VALUES (?, 0, ?)", (nome, user_id))
 
 
 # ---------------------------------------------------------------------------
@@ -499,12 +520,20 @@ def _verify_password(password: str, hashed: str) -> bool:
 
 
 def create_user(email: str, password: str, is_admin: bool = False):
-    """Cria usuário. Retorna o id do usuário recém-criado."""
+    """
+    Cria usuário e já prepara sua própria conta (categorias padrão privadas),
+    para que cada conta tenha seu próprio dashboard desde o primeiro acesso —
+    sem nenhum limite de quantas contas podem ser criadas.
+    Retorna o id do usuário recém-criado.
+    """
     senha_hash = _hash_password(password)
     execute("INSERT INTO users (email, password_hash, is_admin) VALUES (?, ?, ?)",
             (email.strip().lower(), senha_hash, 1 if is_admin else 0))
     row = fetch_one("SELECT id FROM users WHERE email = ?", (email.strip().lower(),))
-    return row["id"] if row else None
+    novo_id = row["id"] if row else None
+    if novo_id is not None:
+        seed_categorias_padrao(novo_id)
+    return novo_id
 
 
 def get_user_by_email(email: str):
@@ -576,17 +605,16 @@ def add_categoria(nome: str, teto_mensal: float = 0.0, user_id: int = None):
 
 def list_categorias(requesting_user: dict = None):
     """
-    Lista categorias VISÍVEIS para requesting_user:
-    - categorias com user_id IS NULL (padrão/global)
-    - categorias com user_id == requesting_user.id
+    Lista SOMENTE as categorias da própria conta (isolamento total entre
+    contas, como em apps como Mobills/Wallet/Spendee). Categorias antigas
+    "globais" (user_id IS NULL) de versões anteriores do sistema também são
+    incluídas apenas para leitura/compatibilidade, mas todo usuário novo já
+    recebe seu próprio conjunto privado ao ser criado (ver seed_categorias_padrao).
     """
-    params = []
-    sql = "SELECT * FROM categorias WHERE (user_id IS NULL)"
-    if requesting_user:
-        sql += " OR user_id = ?"
-        params.append(requesting_user.get("id"))
-    sql += " ORDER BY nome"
-    return fetch_all(sql, params)
+    if not requesting_user:
+        return []
+    sql = "SELECT * FROM categorias WHERE user_id = ? OR user_id IS NULL ORDER BY nome"
+    return fetch_all(sql, (requesting_user.get("id"),))
 
 
 def update_categoria_teto(categoria_id: int, teto_mensal: float, requesting_user: dict):
@@ -617,13 +645,11 @@ def add_cartao(nome: str, dia_fechamento: int, dia_vencimento: int, banco: str =
 
 
 def list_cartoes(requesting_user: dict = None):
-    params = []
-    sql = "SELECT * FROM cartoes WHERE (user_id IS NULL)"
-    if requesting_user:
-        sql += " OR user_id = ?"
-        params.append(requesting_user.get("id"))
-    sql += " ORDER BY nome"
-    return fetch_all(sql, params)
+    """Lista somente os cartões da própria conta (isolamento total entre contas)."""
+    if not requesting_user:
+        return []
+    sql = "SELECT * FROM cartoes WHERE user_id = ? ORDER BY nome"
+    return fetch_all(sql, (requesting_user.get("id"),))
 
 
 def delete_cartao(cartao_id: int, requesting_user: dict):
@@ -647,23 +673,17 @@ def add_receita(data_str: str, origem: str, valor: float, observacao: str = "", 
 
 
 def list_receitas(requesting_user: dict = None, ano: int = None, mes: int = None):
-    sql = "SELECT * FROM receitas WHERE 1=1"
-    params = []
-    conds = []
+    """Lista somente as receitas da própria conta (isolamento total entre contas)."""
+    if not requesting_user:
+        return []
+    sql = "SELECT * FROM receitas WHERE user_id = ?"
+    params = [requesting_user.get("id")]
     if ano is not None:
-        conds.append("strftime('%Y', data) = ?")
+        sql += " AND strftime('%Y', data) = ?"
         params.append(f"{ano:04d}")
     if mes is not None:
-        conds.append("strftime('%m', data) = ?")
+        sql += " AND strftime('%m', data) = ?"
         params.append(f"{mes:02d}")
-    if conds:
-        sql += " AND " + " AND ".join(conds)
-    # visibilidade: somente registros user_id IS NULL (padrão) e do próprio usuário
-    if requesting_user:
-        sql += " AND (user_id IS NULL OR user_id = ?)"
-        params.append(requesting_user.get("id"))
-    else:
-        sql += " AND user_id IS NULL"
     sql += " ORDER BY data DESC"
     return fetch_all(sql, params)
 
@@ -747,28 +767,27 @@ def add_despesa(data_compra: date, categoria_id: int, descricao: str, valor_tota
 
 
 def list_despesas(requesting_user: dict = None, ano: int = None, mes: int = None):
-    """Lista despesas filtrando pela COMPETÊNCIA (mês em que a parcela efetivamente pesa no orçamento)."""
+    """
+    Lista despesas da própria conta (isolamento total entre contas),
+    filtrando pela COMPETÊNCIA (mês em que a parcela efetivamente pesa no
+    orçamento).
+    """
+    if not requesting_user:
+        return []
     sql = """
         SELECT d.*, c.nome AS categoria_nome, ca.nome AS cartao_nome
         FROM despesas d
         LEFT JOIN categorias c ON d.categoria_id = c.id
         LEFT JOIN cartoes ca ON d.cartao_id = ca.id
-        WHERE 1=1
+        WHERE d.user_id = ?
     """
-    conds, params = [], []
+    params = [requesting_user.get("id")]
     if ano is not None:
-        conds.append("strftime('%Y', d.data_competencia) = ?")
+        sql += " AND strftime('%Y', d.data_competencia) = ?"
         params.append(f"{ano:04d}")
     if mes is not None:
-        conds.append("strftime('%m', d.data_competencia) = ?")
+        sql += " AND strftime('%m', d.data_competencia) = ?"
         params.append(f"{mes:02d}")
-    if conds:
-        sql += " AND " + " AND ".join(conds)
-    if requesting_user:
-        sql += " AND (d.user_id IS NULL OR d.user_id = ?)"
-        params.append(requesting_user.get("id"))
-    else:
-        sql += " AND d.user_id IS NULL"
     sql += " ORDER BY d.data_competencia DESC, d.data_compra DESC"
     return fetch_all(sql, params)
 
@@ -808,16 +827,14 @@ def add_despesa_fixa(descricao: str, categoria_id: int, valor: float, forma_paga
 
 
 def list_despesas_fixas(requesting_user: dict = None, somente_ativas: bool = False):
+    """Lista somente as despesas fixas da própria conta (isolamento total entre contas)."""
+    if not requesting_user:
+        return []
     sql = ("SELECT df.*, c.nome AS categoria_nome FROM despesas_fixas df "
-           "LEFT JOIN categorias c ON df.categoria_id = c.id WHERE 1=1")
-    params = []
+           "LEFT JOIN categorias c ON df.categoria_id = c.id WHERE df.user_id = ?")
+    params = [requesting_user.get("id")]
     if somente_ativas:
         sql += " AND ativa = 1"
-    if requesting_user:
-        sql += " AND (df.user_id IS NULL OR df.user_id = ?)"
-        params.append(requesting_user.get("id"))
-    else:
-        sql += " AND df.user_id IS NULL"
     sql += " ORDER BY df.descricao"
     return fetch_all(sql, params)
 
