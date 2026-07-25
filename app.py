@@ -8,20 +8,11 @@ Interface construída em Streamlit. Toda a persistência é feita em SQLite (db.
 e as regras de negócio (parcelamento, competência de cartão, despesas fixas,
 reserva automática e orçamento por categoria) estão implementadas em db.py / utils.py.
 
-CORREÇÕES NESTA VERSÃO:
-- st.experimental_rerun() -> st.rerun() (API antiga removida nas versões recentes do Streamlit)
-- st.experimental_get_query_params() -> st.query_params (nova API)
-- Página "💳 Cartões" agora tem um seletor de Banco (selo colorido/emoji) — ver utils.BANCOS_EMOJI
-- (A causa raiz do ValueError em todas as páginas foi corrigida em db.py: os parâmetros de
-  SQL agora são sempre convertidos para tupla antes de conn.execute(), o que resolve a
-  incompatibilidade com o driver 'libsql' usado no backend Turso/nuvem.)
-
 Para executar:
     streamlit run app.py
 """
-from datetime import date, datetime
+from datetime import date
 import io
-import traceback
 import json
 
 import pandas as pd
@@ -44,16 +35,19 @@ ORIGENS_RECEITA = ["Trabalho principal", "Renda Extra", "Rendimentos", "Outros"]
 
 HOJE = date.today()
 
+
 # -------------------------
 # Autenticação / sessão
 # -------------------------
 def current_user():
     return st.session_state.get("user")
 
+
 def require_login():
     if current_user() is None:
         st.warning("Faça login para usar o aplicativo.")
         st.stop()
+
 
 def show_auth_sidebar():
     st.sidebar.title("💳 Acesso")
@@ -91,10 +85,11 @@ def show_auth_sidebar():
                     st.sidebar.error("Preencha email e senha.")
                 else:
                     try:
-                        uid = db.create_user(email, senha, is_admin=False)
+                        db.create_user(email, senha, is_admin=False)
                         st.sidebar.success("Conta criada. Faça login.")
                     except Exception as e:
                         st.sidebar.error("Falha ao criar conta: " + str(e))
+
 
 show_auth_sidebar()
 
@@ -201,7 +196,6 @@ if pagina == "📊 Dashboard":
         historico = []
         for i in range(11, -1, -1):
             d = db.add_months(date(ano_sel, mes_sel, 1), -i)
-            # calcular por usuário
             r_receitas = db.list_receitas(user, ano=d.year, mes=d.month)
             r_despesas = db.list_despesas(user, ano=d.year, mes=d.month)
             total_r = sum(rr.get("valor", 0) for rr in r_receitas)
@@ -235,10 +229,10 @@ if pagina == "📊 Dashboard":
         cor = utils.cor_status_teto(percentual)
 
         st.markdown(f"**{cat['nome']}** — {utils.formatar_moeda(gasto)} de "
-                     f"{utils.formatar_moeda(cat['teto_mensal'])} ({percentual:.0f}%)")
+                    f"{utils.formatar_moeda(cat['teto_mensal'])} ({percentual:.0f}%)")
         st.markdown(f"""
         <div style="background-color:#e0e0e0; border-radius:6px; height:14px; width:100%;">
-            <div style="background-color:{cor}; width:{min(percentual,100)}%; height:14px; border-radius:6px;"></div>
+            <div style="background-color:{cor}; width:{min(percentual, 100)}%; height:14px; border-radius:6px;"></div>
         </div>
         """, unsafe_allow_html=True)
         if percentual >= 100:
@@ -301,10 +295,12 @@ elif pagina == "📤 Despesas":
     categorias = db.list_categorias(user)
     cartoes = db.list_cartoes(user)
     nomes_categorias = {c["nome"]: c["id"] for c in categorias}
+
     # Rótulo do cartão exibido junto com o selo do banco (se cadastrado)
     def _rotulo_cartao(c):
         selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
         return f"{selo} — {c['nome']}" if selo else c["nome"]
+
     nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
 
     with st.form("form_despesa", clear_on_submit=True):
@@ -391,9 +387,11 @@ elif pagina == "🔁 Despesas Fixas":
     categorias = db.list_categorias(user)
     cartoes = db.list_cartoes(user)
     nomes_categorias = {c["nome"]: c["id"] for c in categorias}
+
     def _rotulo_cartao_fixa(c):
         selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
         return f"{selo} — {c['nome']}" if selo else c["nome"]
+
     nomes_cartoes = {_rotulo_cartao_fixa(c): c["id"] for c in cartoes}
 
     with st.form("form_fixa", clear_on_submit=True):
@@ -638,6 +636,21 @@ elif pagina == "⚙️ Configurações":
         "- O sistema alterna automaticamente entre os dois, dependendo das credenciais configuradas."
     )
 
+    st.markdown("---")
+    st.subheader("🔑 Trocar minha senha")
+    with st.form("form_trocar_senha", clear_on_submit=True):
+        nova_senha = st.text_input("Nova senha", type="password")
+        confirmar_senha = st.text_input("Confirmar nova senha", type="password")
+        if st.form_submit_button("Atualizar senha"):
+            if not nova_senha or len(nova_senha) < 4:
+                st.error("Informe uma senha com pelo menos 4 caracteres.")
+            elif nova_senha != confirmar_senha:
+                st.error("As senhas não conferem.")
+            else:
+                db.set_user_password(user.get("id"), nova_senha)
+                st.success("Senha atualizada com sucesso!")
+
+
 # ---------------------------------------------------------------------------
 # Pequena util para JSON seguro (evitar crash)
 # ---------------------------------------------------------------------------
@@ -649,44 +662,34 @@ def json_safe(s):
     except Exception:
         return s
 
+
 # ---------------------------------------------------------------------------
 # Admin (visível somente se is_admin True) - admins NÃO veem dados privados de outros usuários
 # ---------------------------------------------------------------------------
-query_params = st.query_params
-if query_params.get("admin") or (hasattr(user, "get") and user.get("is_admin")):
-    if user.get("is_admin"):
-        st.markdown("---")
-        st.header("Admin — Gestão de Usuários e Auditoria (Apenas emails e logs são mostrados)")
-        users = db.fetch_all("SELECT id, email, is_admin, created_at FROM users ORDER BY created_at DESC")
-        st.subheader("Usuários (emails apenas)")
-        st.table(users)
-        st.subheader("Ações administrativas: criar usuário")
-        with st.form("admin_create_user"):
-            email_new = st.text_input("Email novo (admin)", key="adm_new_email")
-            senha_new = st.text_input("Senha (temporária)", key="adm_new_pass", type="password")
-            make_admin = st.checkbox("Tornar administrador?", value=False)
-            if st.form_submit_button("Criar usuário"):
-                try:
-                    uid = db.create_user(email_new, senha_new, is_admin=make_admin)
-                    st.success("Usuário criado com id " + str(uid))
-                except Exception as e:
-                    st.error("Erro: " + str(e))
-        st.subheader("Logs de auditoria (ultimas 200 entradas)")
-        logs = db.get_audit_logs(limit=200)
-        st.write(f"Mostrando {len(logs)} registros de auditoria")
-        for L in logs:
-            with st.expander(f"{L.get('timestamp')} — {L.get('action')} — {L.get('table_name')}"):
-                before = json_safe(L.get("before_json"))
-                after = json_safe(L.get("after_json"))
-                st.write("user_id:", L.get("user_id"), "row_id:", L.get("row_id"))
-                st.write("before:", before)
-                st.write("after:", after)
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-
-from datetime import date
-
-import streamlit as st
-
-import db
-import utils
+if user.get("is_admin"):
+    st.markdown("---")
+    st.header("Admin — Gestão de Usuários e Auditoria (Apenas emails e logs são mostrados)")
+    users = db.fetch_all("SELECT id, email, is_admin, created_at FROM users ORDER BY created_at DESC")
+    st.subheader("Usuários (emails apenas)")
+    st.table(users)
+    st.subheader("Ações administrativas: criar usuário")
+    with st.form("admin_create_user"):
+        email_new = st.text_input("Email novo (admin)", key="adm_new_email")
+        senha_new = st.text_input("Senha (temporária)", key="adm_new_pass", type="password")
+        make_admin = st.checkbox("Tornar administrador?", value=False)
+        if st.form_submit_button("Criar usuário"):
+            try:
+                uid = db.create_user(email_new, senha_new, is_admin=make_admin)
+                st.success("Usuário criado com id " + str(uid))
+            except Exception as e:
+                st.error("Erro: " + str(e))
+    st.subheader("Logs de auditoria (últimas 200 entradas)")
+    logs = db.get_audit_logs(limit=200)
+    st.write(f"Mostrando {len(logs)} registros de auditoria")
+    for L in logs:
+        with st.expander(f"{L.get('timestamp')} — {L.get('action')} — {L.get('table_name')}"):
+            before = json_safe(L.get("before_json"))
+            after = json_safe(L.get("after_json"))
+            st.write("user_id:", L.get("user_id"), "row_id:", L.get("row_id"))
+            st.write("before:", before)
+            st.write("after:", after)
