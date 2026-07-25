@@ -4,23 +4,19 @@ db.py
 =====
 Camada de acesso a dados do Sistema de Gestão Financeira Pessoal e Familiar.
 
-CORREÇÕES NESTA VERSÃO:
-- execute()/fetch_all()/fetch_one() agora SEMPRE convertem params para tupla
-  antes de chamar conn.execute(). O driver 'libsql' (usado no backend Turso/nuvem)
-  é mais rígido que o sqlite3 padrão e lança ValueError quando recebe uma lista
-  no lugar de uma tupla — essa era a causa do erro em todas as páginas.
-- Adicionada coluna 'banco' na tabela cartoes (migração automática e segura).
-- add_cartao() agora aceita o parâmetro 'banco'.
-
-Alterações da versão anterior (mantidas):
+- execute()/fetch_all()/fetch_one() sempre convertem params para tupla antes
+  de chamar conn.execute(). O driver 'libsql' (usado no backend Turso/nuvem)
+  é mais rígido que o sqlite3 padrão e lança ValueError quando recebe uma
+  lista no lugar de uma tupla.
 - Tabela users para login (email + password_hash + is_admin).
-- Proteção: admins NÃO podem ver dados pessoais/financeiros de outros usuários por padrão.
+- Proteção: admins NÃO podem ver dados pessoais/financeiros de outros
+  usuários por padrão.
 - audit_logs para histórico (before/after em JSON).
-- user_id em tabelas principais (receitas, despesas, despesas_fixas, categorias, cartoes).
-- Funções de criação/autenticação de usuário (bcrypt).
-- Funções de edição/exclusão que gravam audit_logs.
+- user_id em tabelas principais (receitas, despesas, despesas_fixas,
+  categorias, cartoes).
+- Coluna 'banco' na tabela cartoes (migração automática e segura).
 - Backup local simples do arquivo SQLite.
-- Envio de e-mail opcional (SMTP) para notificações (configurar variáveis de ambiente).
+- Envio de e-mail opcional (SMTP) para notificações.
 """
 
 import os
@@ -47,6 +43,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Configuração de credenciais (Turso / nuvem) e seleção automática de backend
 # ---------------------------------------------------------------------------
+
 
 def _get_secret(key: str):
     """Busca uma credencial em st.secrets (Streamlit Cloud) e, senão, em variáveis de ambiente."""
@@ -153,6 +150,7 @@ def _executar_com_fallback(conn, sql, params):
 # Helpers para converter resultados de query em dicionários
 # ---------------------------------------------------------------------------
 
+
 def _rows_to_dicts(cursor, rows):
     if not rows:
         return []
@@ -170,6 +168,7 @@ def _row_to_dict(cursor, row):
 # ---------------------------------------------------------------------------
 # Primitivas de execução (cada operação abre/fecha conexão)
 # ---------------------------------------------------------------------------
+
 
 def execute(sql: str, params=()):
     """Executa um INSERT/UPDATE/DELETE isolado (não retorna dados)."""
@@ -230,6 +229,7 @@ def fetch_one(sql: str, params=()):
 # Utilitários de data
 # ---------------------------------------------------------------------------
 
+
 def add_months(d: date, months: int) -> date:
     """Soma (ou subtrai) meses a uma data, ajustando o dia se o mês destino for mais curto."""
     month_index = d.month - 1 + months
@@ -247,6 +247,7 @@ def month_key(d: date) -> str:
 # ---------------------------------------------------------------------------
 # Auditoria / backup / e segurança
 # ---------------------------------------------------------------------------
+
 
 def log_action(user_id, action, table_name, row_id=None, before=None, after=None):
     """Registra histórico em audit_logs (before/after em JSON)."""
@@ -307,6 +308,7 @@ def send_email(to_email: str, subject: str, body: str):
 # Inicialização do schema (adiciona users, audit_logs, colunas user_id e banco)
 # ---------------------------------------------------------------------------
 
+
 def _coluna_existe(tabela: str, coluna: str) -> bool:
     """Verifica se uma coluna já existe em uma tabela (via PRAGMA table_info)."""
     try:
@@ -328,7 +330,6 @@ def _garantir_coluna(tabela: str, coluna: str, definicao_sql: str):
 
 def init_db():
     """Cria todas as tabelas do sistema, caso ainda não existam (cada instrução isolada)."""
-    # tabelas originais (mantendo seu schema)
     execute("""
     CREATE TABLE IF NOT EXISTS categorias (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -431,12 +432,12 @@ def init_db():
     """)
 
     # ---------------------------------------------------------------------
-    # MIGRAÇÃO CRÍTICA: adiciona colunas que podem não existir em bancos
-    # (principalmente no Turso/nuvem) criados ANTES da funcionalidade de
-    # login (user_id) e de outras evoluções do schema terem sido introduzidas.
-    # 'CREATE TABLE IF NOT EXISTS' NÃO adiciona colunas novas a uma tabela
-    # que já existe — por isso essas colunas precisam ser migradas aqui,
-    # uma a uma, de forma segura (idempotente).
+    # MIGRAÇÃO: adiciona colunas que podem não existir em bancos criados
+    # ANTES da funcionalidade de login (user_id) e de outras evoluções do
+    # schema terem sido introduzidas. 'CREATE TABLE IF NOT EXISTS' NÃO
+    # adiciona colunas novas a uma tabela que já existe — por isso essas
+    # colunas precisam ser migradas aqui, uma a uma, de forma segura
+    # (idempotente).
     # ---------------------------------------------------------------------
     _garantir_coluna("categorias", "user_id", "INTEGER DEFAULT NULL")
 
@@ -484,6 +485,7 @@ def init_db():
 # Segurança: hashing de senha e CRUD de usuários
 # ---------------------------------------------------------------------------
 
+
 def _hash_password(password: str) -> str:
     if bcrypt is None:
         raise RuntimeError("bcrypt não instalado. Rode: pip install bcrypt")
@@ -518,7 +520,7 @@ def authenticate_user(email: str, password: str):
     if not u:
         return None
     if _verify_password(password, u["password_hash"]):
-        # Remove password_hash when returning user object to UI
+        # Remove password_hash ao retornar o objeto do usuário para a UI
         u_safe = {k: v for k, v in u.items() if k != "password_hash"}
         return u_safe
     return None
@@ -548,11 +550,11 @@ def create_initial_admin(email: str, password: str, send_email_flag: bool = Fals
 # Regras de acesso (PRIVACIDADE): admins NÃO podem ver dados dos usuários
 # ---------------------------------------------------------------------------
 
+
 def _can_access_record(requesting_user, record_user_id) -> bool:
     """
     Política: apenas o dono pode ver seus próprios registros.
-    Mesmo admins NÃO têm acesso aos registros de outros usuários por padrão,
-    conforme solicitado.
+    Mesmo admins NÃO têm acesso aos registros de outros usuários por padrão.
     """
     if requesting_user is None:
         return False
@@ -565,6 +567,7 @@ def _can_access_record(requesting_user, record_user_id) -> bool:
 # ---------------------------------------------------------------------------
 # Categorias (user-aware)
 # ---------------------------------------------------------------------------
+
 
 def add_categoria(nome: str, teto_mensal: float = 0.0, user_id: int = None):
     execute("INSERT INTO categorias (nome, teto_mensal, user_id) VALUES (?, ?, ?)",
@@ -607,6 +610,7 @@ def delete_categoria(categoria_id: int, requesting_user: dict):
 # Cartões de crédito (user-aware)
 # ---------------------------------------------------------------------------
 
+
 def add_cartao(nome: str, dia_fechamento: int, dia_vencimento: int, banco: str = None, user_id: int = None):
     execute("INSERT INTO cartoes (nome, dia_fechamento, dia_vencimento, banco, user_id) VALUES (?, ?, ?, ?, ?)",
             (nome.strip(), dia_fechamento, dia_vencimento, banco, user_id))
@@ -634,10 +638,10 @@ def delete_cartao(cartao_id: int, requesting_user: dict):
 # Receitas (entradas) - user-aware
 # ---------------------------------------------------------------------------
 
+
 def add_receita(data_str: str, origem: str, valor: float, observacao: str = "", user_id: int = None):
     execute("INSERT INTO receitas (data, origem, valor, observacao, user_id) VALUES (?, ?, ?, ?, ?)",
             (data_str, origem, valor, observacao, user_id))
-    # log
     row = fetch_one("SELECT * FROM receitas WHERE id = (SELECT last_insert_rowid())")
     log_action(user_id, "INSERT", "receitas", row.get("id") if row else None, None, row)
 
@@ -645,7 +649,6 @@ def add_receita(data_str: str, origem: str, valor: float, observacao: str = "", 
 def list_receitas(requesting_user: dict = None, ano: int = None, mes: int = None):
     sql = "SELECT * FROM receitas WHERE 1=1"
     params = []
-    # aplicar filtro de ano/mes na coluna data
     conds = []
     if ano is not None:
         conds.append("strftime('%Y', data) = ?")
@@ -687,12 +690,14 @@ def edit_receita(receita_id: int, data_str: str, origem: str, valor: float, obse
 # Despesas: lançamento avulso / parcelado / cartão de crédito (user-aware)
 # ---------------------------------------------------------------------------
 
+
 def calcular_primeira_competencia(data_compra: date, forma_pagamento: str, cartao_row=None) -> date:
     """
     Regra de negócio do cartão de crédito:
     Se a compra for feita APÓS a data de fechamento do cartão, a 1ª parcela
-    cai na fatura (competência) do mês seguinte. Caso contrário, cai no mês atual.
-    Para outras formas de pagamento, a competência é sempre o mês da compra.
+    cai na fatura (competência) do mês seguinte. Caso contrário, cai no mês
+    atual. Para outras formas de pagamento, a competência é sempre o mês da
+    compra.
     """
     if forma_pagamento == "Cartão de Crédito" and cartao_row is not None:
         if data_compra.day > cartao_row["dia_fechamento"]:
@@ -705,8 +710,8 @@ def calcular_primeira_competencia(data_compra: date, forma_pagamento: str, carta
 def add_despesa(data_compra: date, categoria_id: int, descricao: str, valor_total: float,
                 forma_pagamento: str, cartao_id: int = None, parcelas: int = 1, user_id: int = None):
     """
-    Registra uma despesa (à vista ou parcelada) gerando automaticamente
-    uma linha por parcela, já projetada nos meses futuros corretos.
+    Registra uma despesa (à vista ou parcelada) gerando automaticamente uma
+    linha por parcela, já projetada nos meses futuros corretos.
     """
     cartao_row = None
     if cartao_id:
@@ -737,7 +742,6 @@ def add_despesa(data_compra: date, categoria_id: int, descricao: str, valor_tota
             data_compra.isoformat(), competencia_i.isoformat(), categoria_id, descricao,
             valor_i, forma_pagamento, cartao_id, i + 1, parcelas, grupo, user_id
         ))
-        # log por parcela
         row = fetch_one("SELECT * FROM despesas WHERE id = (SELECT last_insert_rowid())")
         log_action(user_id, "INSERT", "despesas", row.get("id") if row else None, None, row)
 
@@ -760,7 +764,6 @@ def list_despesas(requesting_user: dict = None, ano: int = None, mes: int = None
         params.append(f"{mes:02d}")
     if conds:
         sql += " AND " + " AND ".join(conds)
-    # visibilidade
     if requesting_user:
         sql += " AND (d.user_id IS NULL OR d.user_id = ?)"
         params.append(requesting_user.get("id"))
@@ -781,18 +784,17 @@ def delete_despesa(despesa_id: int, requesting_user: dict):
 def delete_grupo(compra_grupo: str, requesting_user: dict):
     """Apaga todas as parcelas de uma mesma compra (apenas do usuário dono)."""
     rows = fetch_all("SELECT * FROM despesas WHERE compra_grupo = ?", (compra_grupo,))
-    # verifica permissão para cada linha (recusa se alguma não pertencer ao solicitante)
     for r in rows:
         if not _can_access_record(requesting_user, r.get("user_id")):
             raise PermissionError("Sem permissão para excluir este grupo de compras.")
     execute("DELETE FROM despesas WHERE compra_grupo = ?", (compra_grupo,))
-    # log por segurança (registro único)
     log_action(requesting_user.get("id"), "DELETE", "despesas", None, rows, None)
 
 
 # ---------------------------------------------------------------------------
 # Despesas fixas / recorrentes (user-aware)
 # ---------------------------------------------------------------------------
+
 
 def add_despesa_fixa(descricao: str, categoria_id: int, valor: float, forma_pagamento: str,
                       cartao_id: int = None, dia_vencimento: int = 1, user_id: int = None):
@@ -806,7 +808,8 @@ def add_despesa_fixa(descricao: str, categoria_id: int, valor: float, forma_paga
 
 
 def list_despesas_fixas(requesting_user: dict = None, somente_ativas: bool = False):
-    sql = "SELECT df.*, c.nome AS categoria_nome FROM despesas_fixas df LEFT JOIN categorias c ON df.categoria_id = c.id WHERE 1=1"
+    sql = ("SELECT df.*, c.nome AS categoria_nome FROM despesas_fixas df "
+           "LEFT JOIN categorias c ON df.categoria_id = c.id WHERE 1=1")
     params = []
     if somente_ativas:
         sql += " AND ativa = 1"
@@ -838,9 +841,9 @@ def delete_despesa_fixa(fixa_id: int, requesting_user: dict):
 
 def gerar_despesas_fixas_do_mes(ano: int, mes: int, requesting_user: dict = None):
     """
-    Duplica automaticamente todas as despesas fixas ativas para o mês/ano informado,
-    evitando duplicidade caso já tenham sido geradas anteriormente.
-    Retorna a quantidade de lançamentos criados.
+    Duplica automaticamente todas as despesas fixas ativas para o mês/ano
+    informado, evitando duplicidade caso já tenham sido geradas
+    anteriormente. Retorna a quantidade de lançamentos criados.
     Somente gera para despesas fixas visíveis ao requesting_user (owner ou globais).
     """
     competencia = date(ano, mes, 1).isoformat()
@@ -876,6 +879,7 @@ def gerar_despesas_fixas_do_mes(ano: int, mes: int, requesting_user: dict = None
 # Configurações (reserva / aporte)
 # ---------------------------------------------------------------------------
 
+
 def get_reserva_percentual() -> float:
     row = fetch_one("SELECT reserva_percentual FROM config WHERE id = 1")
     return row["reserva_percentual"] if row else 0.0
@@ -889,61 +893,16 @@ def set_reserva_percentual(percentual: float):
 # Utilitários pequenos (ex.: obter logs audit)
 # ---------------------------------------------------------------------------
 
+
 def get_audit_logs(limit: int = 200):
     return fetch_all("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
 
 
 # ---------------------------------------------------------------------------
-# Inicialização automática (chamar init_db() ao importar em começo de app)
+# Execução direta (checagem manual do schema)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     print("Inicializando/checando DB...")
     init_db()
     print("OK")
-def execute(sql: str, params=()) -> None:
-    params = tuple(params) if params is not None else ()
-    with _cursor() as (cur, conn):
-        cur.execute(sql, params)
-
-
-def fetch_one(sql: str, params=()) -> Optional[dict]:
-    params = tuple(params) if params is not None else ()
-    with _cursor() as (cur, conn):
-        row = cur.execute(sql, params).fetchone()
-        return dict(row) if row else None
-
-
-def fetch_all(sql: str, params=()) -> list[dict]:
-    params = tuple(params) if params is not None else ()
-    with _cursor() as (cur, conn):
-        rows = cur.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
-
-
-def _ensure_column(table: str, column: str, ddl: str) -> None:
-    cols = fetch_all(f'PRAGMA table_info({table})')
-    if not any(c.get('name') == column for c in cols):
-        try:
-            execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
-        except Exception:
-            pass
-
-
-def init_db() -> None:
-    execute("""
-    CREATE TABLE IF NOT EXISTS usuarios (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        is_verified INTEGER NOT NULL DEFAULT 0,
-        verification_token TEXT,
-        verification_otp TEXT,
-        verification_expires_at TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-    """)
-
-    execute("""
-    CREATE TABLE IF NOT EXISTS dados_particulares (
-        id INTEGER
