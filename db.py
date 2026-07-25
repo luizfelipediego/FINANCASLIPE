@@ -477,9 +477,23 @@ def init_db():
     # "global" que não pertencia a ninguém.
     # Usuários já existentes que ainda não têm nenhuma categoria própria
     # recebem o conjunto padrão automaticamente (migração idempotente).
+    # Feita com UMA única consulta (em vez de checar usuário por usuário) para
+    # não gerar dezenas de idas e vindas ao banco em nuvem a cada execução.
+    # Envolvida em try/except para nunca derrubar o app por uma falha
+    # transitória de conexão durante a migração.
     # ---------------------------------------------------------------------
-    for u in fetch_all("SELECT id FROM users"):
-        seed_categorias_padrao(u["id"])
+    try:
+        usuarios_sem_categoria = fetch_all("""
+            SELECT u.id AS id
+            FROM users u
+            LEFT JOIN categorias c ON c.user_id = u.id
+            GROUP BY u.id
+            HAVING COUNT(c.id) = 0
+        """)
+        for u in usuarios_sem_categoria:
+            seed_categorias_padrao(u["id"])
+    except Exception:
+        pass
 
     # Garante diretório de backups
     ensure_backup_dir()
