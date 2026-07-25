@@ -36,6 +36,21 @@ ORIGENS_RECEITA = ["Trabalho principal", "Renda Extra", "Rendimentos", "Outros"]
 HOJE = date.today()
 
 
+def garantir_fixas_geradas(user, ano, mes):
+    """
+    Gera automaticamente (se ainda não existirem) os lançamentos de despesas
+    fixas ativas na competência informada, para que elas sempre entrem no
+    total de despesas do Dashboard/Relatórios sem precisar de ação manual.
+    A função em db.py já é idempotente (não duplica lançamentos), então é
+    seguro chamá-la toda vez que a página é carregada.
+    """
+    try:
+        db.gerar_despesas_fixas_do_mes(ano, mes, requesting_user=user)
+    except Exception:
+        # Nunca deixa a geração automática quebrar a navegação do usuário.
+        pass
+
+
 # -------------------------
 # Autenticação / sessão
 # -------------------------
@@ -149,6 +164,9 @@ with col2:
 if pagina == "📊 Dashboard":
     st.title(f"📊 Dashboard — {utils.MESES_PT[mes_sel]}/{ano_sel}")
 
+    # Garante que as despesas fixas ativas já estejam contabilizadas neste mês
+    garantir_fixas_geradas(user, ano_sel, mes_sel)
+
     # Construir resumo respeitando o usuário atual (privacidade)
     receitas_list = db.list_receitas(user, ano=ano_sel, mes=mes_sel)
     despesas_list = db.list_despesas(user, ano=ano_sel, mes=mes_sel)
@@ -196,6 +214,7 @@ if pagina == "📊 Dashboard":
         historico = []
         for i in range(11, -1, -1):
             d = db.add_months(date(ano_sel, mes_sel, 1), -i)
+            garantir_fixas_geradas(user, d.year, d.month)
             r_receitas = db.list_receitas(user, ano=d.year, mes=d.month)
             r_despesas = db.list_despesas(user, ano=d.year, mes=d.month)
             total_r = sum(rr.get("valor", 0) for rr in r_receitas)
@@ -282,9 +301,12 @@ elif pagina == "📥 Receitas":
         id_excluir = st.selectbox("Excluir lançamento (selecione o ID)",
                                    [None] + df["id"].tolist())
         if id_excluir and st.button("🗑️ Excluir receita selecionada"):
-            db.delete_receita(id_excluir, user)
-            st.success("Receita excluída.")
-            st.rerun()
+            try:
+                db.delete_receita(id_excluir, user)
+                st.success("Receita excluída.")
+                st.rerun()
+            except PermissionError as e:
+                st.error(str(e))
 
 # ---------------------------------------------------------------------------
 # Página: DESPESAS
@@ -350,6 +372,7 @@ elif pagina == "📤 Despesas":
 
     st.markdown("---")
     st.subheader(f"Despesas — competência de {utils.MESES_PT[mes_sel]}/{ano_sel}")
+    garantir_fixas_geradas(user, ano_sel, mes_sel)
     despesas = db.list_despesas(user, ano_sel, mes_sel)
     df = utils.despesas_para_dataframe(despesas)
     if df.empty:
@@ -368,14 +391,20 @@ elif pagina == "📤 Despesas":
         if id_excluir:
             colx, coly = st.columns(2)
             if colx.button("🗑️ Excluir apenas esta parcela"):
-                db.delete_despesa(id_excluir, user)
-                st.success("Parcela excluída.")
-                st.rerun()
+                try:
+                    db.delete_despesa(id_excluir, user)
+                    st.success("Parcela excluída.")
+                    st.rerun()
+                except PermissionError as e:
+                    st.error(str(e))
             grupo = df.loc[df["id"] == id_excluir, "compra_grupo"].values[0]
             if coly.button("🗑️ Excluir TODAS as parcelas desta compra"):
-                db.delete_grupo(grupo, user)
-                st.success("Todas as parcelas da compra foram excluídas.")
-                st.rerun()
+                try:
+                    db.delete_grupo(grupo, user)
+                    st.success("Todas as parcelas da compra foram excluídas.")
+                    st.rerun()
+                except PermissionError as e:
+                    st.error(str(e))
 
 # ---------------------------------------------------------------------------
 # Página: DESPESAS FIXAS
@@ -435,18 +464,26 @@ elif pagina == "🔁 Despesas Fixas":
         col1, col2, col3 = st.columns(3)
         id_alvo = col1.selectbox("Selecionar ID para ação", df_fixas["id"].tolist())
         if col2.button("⏸️ Pausar / ▶️ Reativar"):
-            atual = df_fixas.loc[df_fixas["id"] == id_alvo, "ativa"].values[0]
-            db.set_despesa_fixa_ativa(id_alvo, not atual, user)
-            st.rerun()
+            try:
+                atual = df_fixas.loc[df_fixas["id"] == id_alvo, "ativa"].values[0]
+                db.set_despesa_fixa_ativa(id_alvo, not atual, user)
+                st.rerun()
+            except PermissionError as e:
+                st.error(str(e))
         if col3.button("🗑️ Excluir cadastro"):
-            db.delete_despesa_fixa(id_alvo, user)
-            st.rerun()
+            try:
+                db.delete_despesa_fixa(id_alvo, user)
+                st.rerun()
+            except PermissionError as e:
+                st.error(str(e))
 
     st.markdown("---")
-    st.subheader(f"Gerar lançamentos do mês selecionado ({utils.MESES_PT[mes_sel]}/{ano_sel})")
-    st.caption("Duplica automaticamente todas as despesas fixas ativas para este mês, "
-               "sem gerar duplicidade se já tiverem sido geradas antes.")
-    if st.button("🔁 Gerar Despesas Fixas do Mês"):
+    st.subheader(f"Lançamentos do mês selecionado ({utils.MESES_PT[mes_sel]}/{ano_sel})")
+    st.caption("As despesas fixas ativas já são contabilizadas automaticamente no Dashboard, "
+               "nas Despesas e nos Relatórios assim que você entra nessas páginas. "
+               "Use o botão abaixo apenas se quiser forçar a atualização agora mesmo, "
+               "por exemplo logo após cadastrar uma nova despesa fixa.")
+    if st.button("🔁 Atualizar lançamentos agora"):
         qtd = db.gerar_despesas_fixas_do_mes(ano_sel, mes_sel, requesting_user=user)
         if qtd > 0:
             st.success(f"{qtd} lançamento(s) gerado(s) para {utils.MESES_PT[mes_sel]}/{ano_sel}.")
@@ -496,8 +533,11 @@ elif pagina == "💳 Cartões":
 
         id_excluir = st.selectbox("Excluir cartão (ID)", [None] + [c["id"] for c in cartoes])
         if id_excluir and st.button("🗑️ Excluir cartão"):
-            db.delete_cartao(id_excluir, user)
-            st.rerun()
+            try:
+                db.delete_cartao(id_excluir, user)
+                st.rerun()
+            except PermissionError as e:
+                st.error(str(e))
 
         st.info(
             "📌 **Regra de fechamento:** compras feitas *após* o dia de fechamento têm a "
@@ -535,15 +575,21 @@ elif pagina == "🏷️ Categorias e Orçamento":
                                        value=float(cat.get("teto_mensal") or 0), step=50.0,
                                        key=f"teto_{cat['id']}", label_visibility="collapsed")
         if col3.button("Salvar", key=f"salvar_{cat['id']}"):
-            db.update_categoria_teto(cat["id"], novo_teto, requesting_user=user)
-            st.success(f"Teto de {cat['nome']} atualizado!")
-            st.rerun()
+            try:
+                db.update_categoria_teto(cat["id"], novo_teto, requesting_user=user)
+                st.success(f"Teto de {cat['nome']} atualizado!")
+                st.rerun()
+            except PermissionError as e:
+                st.error(str(e))
 
     st.markdown("---")
     id_excluir = st.selectbox("Excluir categoria (ID)", [None] + [c["id"] for c in categorias])
     if id_excluir and st.button("🗑️ Excluir categoria selecionada"):
-        db.delete_categoria(id_excluir, requesting_user=user)
-        st.rerun()
+        try:
+            db.delete_categoria(id_excluir, requesting_user=user)
+            st.rerun()
+        except PermissionError as e:
+            st.error(str(e))
 
 # ---------------------------------------------------------------------------
 # Página: RELATÓRIOS E EXPORTAÇÃO
@@ -554,9 +600,12 @@ elif pagina == "📁 Relatórios e Exportação":
     modo = st.radio("Visualizar por período:", ["Mensal", "Diário (dentro do mês)", "Anual"], horizontal=True)
 
     if modo == "Anual":
+        for m in range(1, 13):
+            garantir_fixas_geradas(user, ano_sel, m)
         receitas = db.list_receitas(user, ano_sel, None)
         despesas = db.list_despesas(user, ano_sel, None)
     else:
+        garantir_fixas_geradas(user, ano_sel, mes_sel)
         receitas = db.list_receitas(user, ano_sel, mes_sel)
         despesas = db.list_despesas(user, ano_sel, mes_sel)
 
