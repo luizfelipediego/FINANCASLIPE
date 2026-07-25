@@ -28,7 +28,23 @@ import utils
 
 st.set_page_config(page_title="Gestão Financeira Familiar", page_icon="💰", layout="wide")
 
-db.init_db()
+
+@st.cache_resource(show_spinner=False)
+def _inicializar_banco_uma_vez():
+    """
+    db.init_db() cria tabelas, roda migrações (ALTER TABLE) e semeia
+    categorias padrão para usuários que ainda não têm. No Streamlit, o script
+    inteiro roda de novo a cada clique/interação — sem esse cache, essa rotina
+    seria executada em TODO clique de TODO usuário, multiplicando o número de
+    idas e vindas ao banco (especialmente caro/instável em backend de nuvem
+    como o Turso). Com @st.cache_resource, roda de verdade só uma vez por
+    processo do servidor.
+    """
+    db.init_db()
+    return True
+
+
+_inicializar_banco_uma_vez()
 
 FORMAS_PAGAMENTO = ["PIX", "Cartão de Crédito", "Cartão de Débito", "Dinheiro", "Transferência"]
 ORIGENS_RECEITA = ["Trabalho principal", "Renda Extra", "Rendimentos", "Outros"]
