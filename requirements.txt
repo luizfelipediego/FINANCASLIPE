@@ -1,6 +1,2 @@
-streamlit>=1.35.0
-pandas>=2.0.0
-plotly>=5.20.0
-openpyxl>=3.1.0
-libsql>=0.1.0
-bcrypt==4.0.1
+flask==3.0.0
+flask-bcrypt==1.0.1

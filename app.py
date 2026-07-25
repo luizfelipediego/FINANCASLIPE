@@ -1,760 +1,475 @@
 # -*- coding: utf-8 -*-
 """
-app.py
-======
-Sistema de Gestão Financeira Pessoal e Familiar (com autenticação de usuário)
-------------------------------------------------
-Interface construída em Streamlit. Toda a persistência é feita em SQLite (db.py)
-e as regras de negócio (parcelamento, competência de cartão, despesas fixas,
-reserva automática e orçamento por categoria) estão implementadas em db.py / utils.py.
-
-Para executar:
-    streamlit run app.py
+SISTEMA DE GESTAO DE USUARIOS COM ISOLAMENTO DE DADOS
+-------------------------------------------------------
+Framework: Flask (Python)
+Banco de dados: SQLite
+Seguranca: Bcrypt (hash de senhas - senhas nunca sao armazenadas em texto puro)
+Reset de senha: via e-mail (SMTP)
 """
-from datetime import date
-import io
-import json
 
-import pandas as pd
-import plotly.express as px
-import streamlit as st
-
-import db
-import utils
-
-# ---------------------------------------------------------------------------
-# Configuração inicial
-# ---------------------------------------------------------------------------
-
-st.set_page_config(page_title="Gestão Financeira Familiar", page_icon="💰", layout="wide")
-
-
-@st.cache_resource(show_spinner=False)
-def _inicializar_banco_uma_vez():
-    """
-    db.init_db() cria tabelas, roda migrações (ALTER TABLE) e semeia
-    categorias padrão para usuários que ainda não têm. No Streamlit, o script
-    inteiro roda de novo a cada clique/interação — sem esse cache, essa rotina
-    seria executada em TODO clique de TODO usuário, multiplicando o número de
-    idas e vindas ao banco (especialmente caro/instável em backend de nuvem
-    como o Turso). Com @st.cache_resource, roda de verdade só uma vez por
-    processo do servidor.
-    """
-    db.init_db()
-    return True
-
-
-_inicializar_banco_uma_vez()
-
-FORMAS_PAGAMENTO = ["PIX", "Cartão de Crédito", "Cartão de Débito", "Dinheiro", "Transferência"]
-ORIGENS_RECEITA = ["Trabalho principal", "Renda Extra", "Rendimentos", "Outros"]
-
-HOJE = date.today()
-
-
-def garantir_fixas_geradas(user, ano, mes):
-    """
-    Gera automaticamente (se ainda não existirem) os lançamentos de despesas
-    fixas ativas na competência informada, para que elas sempre entrem no
-    total de despesas do Dashboard/Relatórios sem precisar de ação manual.
-    A função em db.py já é idempotente (não duplica lançamentos), então é
-    seguro chamá-la toda vez que a página é carregada.
-    """
-    try:
-        db.gerar_despesas_fixas_do_mes(ano, mes, requesting_user=user)
-    except Exception:
-        # Nunca deixa a geração automática quebrar a navegação do usuário.
-        pass
-
-
-# -------------------------
-# Autenticação / sessão
-# -------------------------
-def current_user():
-    return st.session_state.get("user")
-
-
-def require_login():
-    if current_user() is None:
-        st.warning("Faça login para usar o aplicativo.")
-        st.stop()
-
-
-def show_auth_sidebar():
-    st.sidebar.title("💳 Acesso")
-    if "user" not in st.session_state:
-        st.session_state["user"] = None
-
-    if st.session_state["user"]:
-        u = st.session_state["user"]
-        st.sidebar.write(f"Logado como: {u.get('email')}")
-        if u.get("is_admin"):
-            st.sidebar.info("Conta: Administrador (não vê dados privados de outros usuários)")
-        if st.sidebar.button("Sair"):
-            st.session_state["user"] = None
-            st.rerun()
-    else:
-        tab = st.sidebar.radio("Ação", ("Entrar", "Criar conta"), index=0)
-        if tab == "Entrar":
-            email = st.sidebar.text_input("Email", key="login_email")
-            senha = st.sidebar.text_input("Senha", type="password", key="login_pass")
-            if st.sidebar.button("Entrar"):
-                try:
-                    u = db.authenticate_user(email, senha)
-                    if u:
-                        st.session_state["user"] = u
-                        st.rerun()
-                    else:
-                        st.sidebar.error("Credenciais inválidas")
-                except Exception as e:
-                    st.sidebar.error(f"Erro ao autenticar: {e}")
-        else:
-            email = st.sidebar.text_input("Email (novo)", key="reg_email")
-            senha = st.sidebar.text_input("Senha (nova)", type="password", key="reg_pass")
-            if st.sidebar.button("Criar conta"):
-                if not email or not senha:
-                    st.sidebar.error("Preencha email e senha.")
-                else:
-                    try:
-                        db.create_user(email, senha, is_admin=False)
-                        st.sidebar.success("Conta criada. Faça login.")
-                    except Exception as e:
-                        st.sidebar.error("Falha ao criar conta: " + str(e))
-
-
-show_auth_sidebar()
-
-# -------------------------
-# Sidebar / navegação (após auth)
-# -------------------------
-require_login()
-user = current_user()
-
-st.sidebar.markdown("---")
-st.sidebar.title("💰 Finanças da Família")
-pagina = st.sidebar.radio(
-    "Navegação",
-    [
-        "📊 Dashboard",
-        "📥 Receitas",
-        "📤 Despesas",
-        "🔁 Despesas Fixas",
-        "💳 Cartões",
-        "🏷️ Categorias e Orçamento",
-        "📁 Relatórios e Exportação",
-        "⚙️ Configurações",
-    ],
-)
-
-st.sidebar.markdown("---")
-ano_sel = st.sidebar.selectbox("Ano de referência", list(range(HOJE.year - 3, HOJE.year + 2)),
-                                index=3)
-mes_sel = st.sidebar.selectbox("Mês de referência", list(range(1, 13)),
-                                index=HOJE.month - 1,
-                                format_func=lambda m: utils.MESES_PT[m])
-st.sidebar.caption("Esse período é usado no Dashboard, Relatórios e Orçamento.")
-
-# -------------------------
-# Cabeçalho principal
-# -------------------------
-st.title("FINANCASLIPE — Painel")
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.markdown(f"**Usuário:** {user.get('email')}")
-    mode = db.get_backend_info()
-    st.markdown(f"**Backend:** {mode}")
-with col2:
-    if st.button("Fazer backup local agora"):
-        try:
-            path = db.backup_db()
-            if path:
-                st.success(f"Backup criado: {path}")
-            else:
-                st.warning("Backup não disponível para backend em nuvem.")
-        except Exception as e:
-            st.error("Erro ao criar backup: " + str(e))
-
-# ---------------------------------------------------------------------------
-# Página: DASHBOARD
-# ---------------------------------------------------------------------------
-if pagina == "📊 Dashboard":
-    st.title(f"📊 Dashboard — {utils.MESES_PT[mes_sel]}/{ano_sel}")
-
-    # Garante que as despesas fixas ativas já estejam contabilizadas neste mês
-    garantir_fixas_geradas(user, ano_sel, mes_sel)
-
-    # Construir resumo respeitando o usuário atual (privacidade)
-    receitas_list = db.list_receitas(user, ano=ano_sel, mes=mes_sel)
-    despesas_list = db.list_despesas(user, ano=ano_sel, mes=mes_sel)
-
-    total_receitas = sum(r.get("valor", 0) for r in receitas_list)
-    total_despesas = sum(d.get("valor", 0) for d in despesas_list)
-    percentual_reserva = db.get_reserva_percentual()
-    valor_reserva = total_receitas * percentual_reserva / 100.0
-    saldo_livre = total_receitas - total_despesas - valor_reserva
-
-    resumo = {
-        "total_receitas": total_receitas,
-        "total_despesas": total_despesas,
-        "percentual_reserva": percentual_reserva,
-        "valor_reserva": valor_reserva,
-        "saldo_livre": saldo_livre,
-        "despesas": despesas_list,
-    }
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total de Receitas", utils.formatar_moeda(resumo["total_receitas"]))
-    col2.metric("Total de Despesas", utils.formatar_moeda(resumo["total_despesas"]))
-    col3.metric(f"Reserva ({resumo['percentual_reserva']:.1f}%)",
-                utils.formatar_moeda(resumo["valor_reserva"]))
-    col4.metric("Saldo Livre Líquido", utils.formatar_moeda(resumo["saldo_livre"]),
-                delta=None if resumo["saldo_livre"] >= 0 else "Atenção: negativo")
-
-    st.markdown("---")
-
-    col_a, col_b = st.columns(2)
-    # Gráfico de distribuição por categoria (mês atual)
-    with col_a:
-        st.subheader("Distribuição de Despesas por Categoria")
-        df_desp = utils.despesas_para_dataframe(resumo["despesas"])
-        if not df_desp.empty:
-            df_group = df_desp.groupby("categoria_nome", as_index=False)["valor"].sum()
-            fig = px.pie(df_group, names="categoria_nome", values="valor", hole=0.4)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Nenhuma despesa lançada nesta competência.")
-
-    # Evolução mensal de saldo (últimos 12 meses até o período selecionado)
-    with col_b:
-        st.subheader("Evolução Mensal do Saldo")
-        historico = []
-        for i in range(11, -1, -1):
-            d = db.add_months(date(ano_sel, mes_sel, 1), -i)
-            garantir_fixas_geradas(user, d.year, d.month)
-            r_receitas = db.list_receitas(user, ano=d.year, mes=d.month)
-            r_despesas = db.list_despesas(user, ano=d.year, mes=d.month)
-            total_r = sum(rr.get("valor", 0) for rr in r_receitas)
-            total_d = sum(dd.get("valor", 0) for dd in r_despesas)
-            perc = db.get_reserva_percentual()
-            historico.append({
-                "mes": f"{utils.MESES_PT[d.month][:3]}/{str(d.year)[2:]}",
-                "Saldo Livre": total_r - total_d - (total_r * perc / 100.0),
-                "Receitas": total_r,
-                "Despesas": total_d,
-            })
-        df_hist = pd.DataFrame(historico)
-        fig2 = px.line(df_hist, x="mes", y=["Receitas", "Despesas", "Saldo Livre"], markers=True)
-        fig2.update_layout(legend_title_text="", xaxis_title="", yaxis_title="R$")
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("🚦 Alertas de Teto de Gastos por Categoria")
-
-    categorias = db.list_categorias(user)
-    df_desp_cat = utils.despesas_para_dataframe(resumo["despesas"])
-    algum_teto_definido = False
-
-    for cat in categorias:
-        if not cat.get("teto_mensal") or cat["teto_mensal"] <= 0:
-            continue
-        algum_teto_definido = True
-        gasto = df_desp_cat.loc[df_desp_cat["categoria_nome"] == cat["nome"], "valor"].sum() \
-            if not df_desp_cat.empty else 0.0
-        percentual = (gasto / cat["teto_mensal"]) * 100 if cat["teto_mensal"] else 0
-        cor = utils.cor_status_teto(percentual)
-
-        st.markdown(f"**{cat['nome']}** — {utils.formatar_moeda(gasto)} de "
-                    f"{utils.formatar_moeda(cat['teto_mensal'])} ({percentual:.0f}%)")
-        st.markdown(f"""
-        <div style="background-color:#e0e0e0; border-radius:6px; height:14px; width:100%;">
-            <div style="background-color:{cor}; width:{min(percentual, 100)}%; height:14px; border-radius:6px;"></div>
-        </div>
-        """, unsafe_allow_html=True)
-        if percentual >= 100:
-            st.error(f"⚠️ Teto de **{cat['nome']}** ultrapassado!")
-        elif percentual >= 80:
-            st.warning(f"Atenção: **{cat['nome']}** já atingiu {percentual:.0f}% do teto.")
-        st.write("")
-
-    if not algum_teto_definido:
-        st.info("Nenhum teto de gasto configurado ainda. Defina em '🏷️ Categorias e Orçamento'.")
-
-# ---------------------------------------------------------------------------
-# Página: RECEITAS
-# ---------------------------------------------------------------------------
-elif pagina == "📥 Receitas":
-    st.title("📥 Receitas (Entradas)")
-
-    with st.form("form_receita", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        data_receita = c1.date_input("Data", value=HOJE)
-        origem = c2.selectbox("Origem", ORIGENS_RECEITA)
-        valor = c3.number_input("Valor (R$)", min_value=0.0, step=50.0, format="%.2f")
-        observacao = st.text_input("Observação (opcional)")
-        enviado = st.form_submit_button("➕ Registrar Receita")
-        if enviado:
-            if valor <= 0:
-                st.error("Informe um valor maior que zero.")
-            else:
-                db.add_receita(data_receita.isoformat(), origem, valor, observacao, user_id=user.get("id"))
-                perc = db.get_reserva_percentual()
-                st.success(
-                    f"Receita registrada! Reserva automática ({perc:.1f}%): "
-                    f"{utils.formatar_moeda(valor * perc / 100)}"
-                )
-
-    st.markdown("---")
-    st.subheader(f"Receitas de {utils.MESES_PT[mes_sel]}/{ano_sel}")
-    receitas = db.list_receitas(user, ano_sel, mes_sel)
-    df = utils.receitas_para_dataframe(receitas)
-    if df.empty:
-        st.info("Nenhuma receita lançada neste período.")
-    else:
-        df_show = df.copy()
-        df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        id_excluir = st.selectbox("Excluir lançamento (selecione o ID)",
-                                   [None] + df["id"].tolist())
-        if id_excluir and st.button("🗑️ Excluir receita selecionada"):
-            try:
-                db.delete_receita(id_excluir, user)
-                st.success("Receita excluída.")
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
-
-# ---------------------------------------------------------------------------
-# Página: DESPESAS
-# ---------------------------------------------------------------------------
-elif pagina == "📤 Despesas":
-    st.title("📤 Despesas (Saídas)")
-
-    categorias = db.list_categorias(user)
-    cartoes = db.list_cartoes(user)
-    nomes_categorias = {c["nome"]: c["id"] for c in categorias}
-
-    # Rótulo do cartão exibido junto com o selo do banco (se cadastrado)
-    def _rotulo_cartao(c):
-        selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
-        return f"{selo} — {c['nome']}" if selo else c["nome"]
-
-    nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
-
-    with st.form("form_despesa", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        data_compra = c1.date_input("Data da compra/despesa", value=HOJE)
-        descricao = c2.text_input("Descrição")
-
-        c3, c4 = st.columns(2)
-        categoria_nome = c3.selectbox("Categoria", list(nomes_categorias.keys()))
-        forma_pagamento = c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO)
-
-        cartao_nome = None
-        if forma_pagamento in ("Cartão de Crédito", "Cartão de Débito"):
-            if nomes_cartoes:
-                cartao_nome = st.selectbox("Cartão utilizado", list(nomes_cartoes.keys()))
-            else:
-                st.warning("Nenhum cartão cadastrado. Cadastre em '💳 Cartões'.")
-
-        c5, c6 = st.columns(2)
-        valor_total = c5.number_input("Valor total (R$)", min_value=0.0, step=10.0, format="%.2f")
-        parcelas = 1
-        if forma_pagamento == "Cartão de Crédito":
-            parcelas = c6.number_input("Quantidade de parcelas", min_value=1, max_value=48, value=1, step=1)
-
-        enviado = st.form_submit_button("➕ Registrar Despesa")
-
-        if enviado:
-            if valor_total <= 0:
-                st.error("Informe um valor maior que zero.")
-            elif not descricao.strip():
-                st.error("Informe uma descrição.")
-            else:
-                categoria_id = nomes_categorias.get(categoria_nome)
-                cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
-                db.add_despesa(data_compra, categoria_id, descricao, valor_total,
-                                forma_pagamento, cartao_id, parcelas, user_id=user.get("id"))
-
-                if parcelas > 1:
-                    cartao_row = next((c for c in cartoes if c["id"] == cartao_id), None)
-                    primeira = db.calcular_primeira_competencia(data_compra, forma_pagamento, cartao_row)
-                    st.success(
-                        f"Despesa parcelada em {parcelas}x registrada! "
-                        f"1ª parcela na competência de {utils.MESES_PT[primeira.month]}/{primeira.year}."
-                    )
-                else:
-                    st.success("Despesa registrada com sucesso!")
-
-    st.markdown("---")
-    st.subheader(f"Despesas — competência de {utils.MESES_PT[mes_sel]}/{ano_sel}")
-    garantir_fixas_geradas(user, ano_sel, mes_sel)
-    despesas = db.list_despesas(user, ano_sel, mes_sel)
-    df = utils.despesas_para_dataframe(despesas)
-    if df.empty:
-        st.info("Nenhuma despesa nesta competência.")
-    else:
-        df_show = df.copy()
-        df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
-        df_show["parcela"] = df_show["parcela_atual"].astype(str) + "/" + df_show["parcela_total"].astype(str)
-        df_show = df_show[["id", "data_compra", "categoria_nome", "descricao", "valor",
-                            "forma_pagamento", "cartao_nome", "parcela"]]
-        df_show.columns = ["ID", "Data Compra", "Categoria", "Descrição", "Valor",
-                            "Pagamento", "Cartão", "Parcela"]
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        id_excluir = st.selectbox("Excluir lançamento (selecione o ID)", [None] + df["id"].tolist())
-        if id_excluir:
-            colx, coly = st.columns(2)
-            if colx.button("🗑️ Excluir apenas esta parcela"):
-                try:
-                    db.delete_despesa(id_excluir, user)
-                    st.success("Parcela excluída.")
-                    st.rerun()
-                except PermissionError as e:
-                    st.error(str(e))
-            grupo = df.loc[df["id"] == id_excluir, "compra_grupo"].values[0]
-            if coly.button("🗑️ Excluir TODAS as parcelas desta compra"):
-                try:
-                    db.delete_grupo(grupo, user)
-                    st.success("Todas as parcelas da compra foram excluídas.")
-                    st.rerun()
-                except PermissionError as e:
-                    st.error(str(e))
-
-# ---------------------------------------------------------------------------
-# Página: DESPESAS FIXAS
-# ---------------------------------------------------------------------------
-elif pagina == "🔁 Despesas Fixas":
-    st.title("🔁 Despesas Fixas / Recorrentes")
-    st.caption("Ex.: Aluguel, Internet, Assinaturas. Gere os lançamentos do mês com um clique.")
-
-    categorias = db.list_categorias(user)
-    cartoes = db.list_cartoes(user)
-    nomes_categorias = {c["nome"]: c["id"] for c in categorias}
-
-    def _rotulo_cartao_fixa(c):
-        selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
-        return f"{selo} — {c['nome']}" if selo else c["nome"]
-
-    nomes_cartoes = {_rotulo_cartao_fixa(c): c["id"] for c in cartoes}
-
-    with st.form("form_fixa", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        descricao = c1.text_input("Descrição (ex: Aluguel)")
-        categoria_nome = c2.selectbox("Categoria", list(nomes_categorias.keys()))
-
-        c3, c4, c5 = st.columns(3)
-        valor = c3.number_input("Valor mensal (R$)", min_value=0.0, step=10.0, format="%.2f")
-        forma_pagamento = c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO)
-        dia_vencimento = c5.number_input("Dia de vencimento", min_value=1, max_value=28, value=5)
-
-        cartao_nome = None
-        if forma_pagamento in ("Cartão de Crédito", "Cartão de Débito") and nomes_cartoes:
-            cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()))
-
-        enviado = st.form_submit_button("➕ Cadastrar Despesa Fixa")
-        if enviado:
-            if not descricao.strip() or valor <= 0:
-                st.error("Preencha descrição e valor corretamente.")
-            else:
-                cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
-                db.add_despesa_fixa(descricao, nomes_categorias[categoria_nome], valor,
-                                     forma_pagamento, cartao_id, dia_vencimento, user_id=user.get("id"))
-                st.success("Despesa fixa cadastrada!")
-
-    st.markdown("---")
-    st.subheader("Despesas fixas cadastradas")
-    fixas = db.list_despesas_fixas(user, somente_ativas=False)
-    if not fixas:
-        st.info("Nenhuma despesa fixa cadastrada.")
-    else:
-        df_fixas = pd.DataFrame([dict(f) for f in fixas])
-        df_show = df_fixas[["id", "descricao", "categoria_nome", "valor",
-                             "forma_pagamento", "dia_vencimento", "ativa"]].copy()
-        df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
-        df_show["ativa"] = df_show["ativa"].apply(lambda x: "✅ Ativa" if x else "⏸️ Pausada")
-        df_show.columns = ["ID", "Descrição", "Categoria", "Valor", "Pagamento", "Dia Venc.", "Status"]
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        col1, col2, col3 = st.columns(3)
-        id_alvo = col1.selectbox("Selecionar ID para ação", df_fixas["id"].tolist())
-        if col2.button("⏸️ Pausar / ▶️ Reativar"):
-            try:
-                atual = df_fixas.loc[df_fixas["id"] == id_alvo, "ativa"].values[0]
-                db.set_despesa_fixa_ativa(id_alvo, not atual, user)
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
-        if col3.button("🗑️ Excluir cadastro"):
-            try:
-                db.delete_despesa_fixa(id_alvo, user)
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
-
-    st.markdown("---")
-    st.subheader(f"Lançamentos do mês selecionado ({utils.MESES_PT[mes_sel]}/{ano_sel})")
-    st.caption("As despesas fixas ativas já são contabilizadas automaticamente no Dashboard, "
-               "nas Despesas e nos Relatórios assim que você entra nessas páginas. "
-               "Use o botão abaixo apenas se quiser forçar a atualização agora mesmo, "
-               "por exemplo logo após cadastrar uma nova despesa fixa.")
-    if st.button("🔁 Atualizar lançamentos agora"):
-        qtd = db.gerar_despesas_fixas_do_mes(ano_sel, mes_sel, requesting_user=user)
-        if qtd > 0:
-            st.success(f"{qtd} lançamento(s) gerado(s) para {utils.MESES_PT[mes_sel]}/{ano_sel}.")
-        else:
-            st.info("Todos os lançamentos deste mês já haviam sido gerados anteriormente.")
-
-# ---------------------------------------------------------------------------
-# Página: CARTÕES
-# ---------------------------------------------------------------------------
-elif pagina == "💳 Cartões":
-    st.title("💳 Gestão de Cartões de Crédito")
-    st.caption(
-        "O selo abaixo (emoji colorido) é apenas uma identificação visual — não reproduz "
-        "a logomarca oficial de nenhum banco, já que são marcas registradas."
-    )
-
-    with st.form("form_cartao", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        banco = c1.selectbox("Banco / Instituição", list(utils.BANCOS_EMOJI.keys()),
-                              format_func=lambda b: utils.BANCOS_EMOJI[b])
-        nome = c2.text_input("Apelido do cartão (ex: Nubank Roxinho, Itaú Platinum)")
-
-        c3, c4 = st.columns(2)
-        dia_fechamento = c3.number_input("Dia de fechamento da fatura", min_value=1, max_value=28, value=25)
-        dia_vencimento = c4.number_input("Dia de vencimento da fatura", min_value=1, max_value=28, value=5)
-        enviado = st.form_submit_button("➕ Cadastrar Cartão")
-        if enviado:
-            if not nome.strip():
-                st.error("Informe o apelido do cartão.")
-            else:
-                try:
-                    db.add_cartao(nome, dia_fechamento, dia_vencimento, banco=banco, user_id=user.get("id"))
-                    st.success(f"Cartão {utils.BANCOS_EMOJI[banco]} cadastrado!")
-                except Exception:
-                    st.error("Já existe um cartão com esse nome.")
-
-    st.markdown("---")
-    cartoes = db.list_cartoes(user)
-    if not cartoes:
-        st.info("Nenhum cartão cadastrado ainda.")
-    else:
-        df = utils.cartoes_para_dataframe(cartoes)
-        df_show = df.copy()
-        df_show["banco"] = df_show["banco"].apply(lambda b: utils.BANCOS_EMOJI.get(b, b or "—"))
-        df_show.columns = ["ID", "Banco", "Nome", "Dia Fechamento", "Dia Vencimento"]
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        id_excluir = st.selectbox("Excluir cartão (ID)", [None] + [c["id"] for c in cartoes])
-        if id_excluir and st.button("🗑️ Excluir cartão"):
-            try:
-                db.delete_cartao(id_excluir, user)
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
-
-        st.info(
-            "📌 **Regra de fechamento:** compras feitas *após* o dia de fechamento têm a "
-            "1ª parcela lançada automaticamente na fatura (competência) do **mês seguinte**."
+import os
+import sqlite3
+import secrets
+from datetime import datetime, timedelta
+from flask import Flask, render_template_string, request, redirect, url_for, session, flash
+from flask_bcrypt import Bcrypt
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)
+bcrypt = Bcrypt(app)
+
+# ============================================================
+# CONFIGURACOES DE E-MAIL (ALTERE COM SEUS DADOS)
+# ============================================================
+EMAIL_REMETENTE = "seu_email@gmail.com"
+EMAIL_SENHA = "sua_senha_de_app"  # Use uma "Senha de App" do Gmail
+SMTP_SERVIDOR = "smtp.gmail.com"
+SMTP_PORTA = 587
+
+# ============================================================
+# BANCO DE DADOS - INICIALIZACAO
+# ============================================================
+DB_NAME = "usuarios.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            login TEXT UNIQUE NOT NULL,
+            email TEXT NOT NULL,
+            senha_hash TEXT NOT NULL,
+            data_cadastro TEXT NOT NULL,
+            token_reset TEXT,
+            token_expira TEXT
         )
+    """)
+    conn.commit()
+    conn.close()
 
-# ---------------------------------------------------------------------------
-# Página: CATEGORIAS E ORÇAMENTO
-# ---------------------------------------------------------------------------
-elif pagina == "🏷️ Categorias e Orçamento":
-    st.title("🏷️ Categorias de Despesa e Teto de Gastos")
+init_db()
 
-    with st.form("form_categoria", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        nome = c1.text_input("Nova categoria (ex: Pet, Viagem)")
-        teto = c2.number_input("Teto mensal (R$) — opcional, 0 = sem limite", min_value=0.0, step=50.0)
-        enviado = st.form_submit_button("➕ Adicionar Categoria")
-        if enviado:
-            if not nome.strip():
-                st.error("Informe o nome da categoria.")
-            else:
-                try:
-                    db.add_categoria(nome, teto, user_id=user.get("id"))
-                    st.success("Categoria criada!")
-                except Exception:
-                    st.error("Já existe uma categoria com esse nome.")
+# ============================================================
+# HELPERS DE BANCO DE DADOS
+# ============================================================
+def get_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    st.markdown("---")
-    st.subheader("Categorias cadastradas — defina/edite o teto mensal")
-    categorias = db.list_categorias(user)
-    for cat in categorias:
-        col1, col2, col3 = st.columns([3, 2, 1])
-        col1.write(f"**{cat['nome']}**")
-        novo_teto = col2.number_input(f"Teto (R$) — {cat['nome']}", min_value=0.0,
-                                       value=float(cat.get("teto_mensal") or 0), step=50.0,
-                                       key=f"teto_{cat['id']}", label_visibility="collapsed")
-        if col3.button("Salvar", key=f"salvar_{cat['id']}"):
-            try:
-                db.update_categoria_teto(cat["id"], novo_teto, requesting_user=user)
-                st.success(f"Teto de {cat['nome']} atualizado!")
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
+def validar_senha(senha):
+    """Valida se a senha atende aos criterios: ate 10 chars, letras e/ou numeros."""
+    if len(senha) > 10:
+        return False, "A senha deve ter no maximo 10 caracteres."
+    if not senha.isalnum():
+        return False, "A senha deve conter apenas letras e numeros."
+    tem_maiuscula = any(c.isupper() for c in senha)
+    tem_minuscula = any(c.islower() for c in senha)
+    tem_numero = any(c.isdigit() for c in senha)
+    if not (tem_maiuscula or tem_minuscula or tem_numero):
+        return False, "A senha deve conter pelo menos letras ou numeros."
+    return True, "Senha valida."
 
-    st.markdown("---")
-    id_excluir = st.selectbox("Excluir categoria (ID)", [None] + [c["id"] for c in categorias])
-    if id_excluir and st.button("🗑️ Excluir categoria selecionada"):
-        try:
-            db.delete_categoria(id_excluir, requesting_user=user)
-            st.rerun()
-        except PermissionError as e:
-            st.error(str(e))
-
-# ---------------------------------------------------------------------------
-# Página: RELATÓRIOS E EXPORTAÇÃO
-# ---------------------------------------------------------------------------
-elif pagina == "📁 Relatórios e Exportação":
-    st.title("📁 Relatórios, Filtros e Exportação")
-
-    modo = st.radio("Visualizar por período:", ["Mensal", "Diário (dentro do mês)", "Anual"], horizontal=True)
-
-    if modo == "Anual":
-        for m in range(1, 13):
-            garantir_fixas_geradas(user, ano_sel, m)
-        receitas = db.list_receitas(user, ano_sel, None)
-        despesas = db.list_despesas(user, ano_sel, None)
-    else:
-        garantir_fixas_geradas(user, ano_sel, mes_sel)
-        receitas = db.list_receitas(user, ano_sel, mes_sel)
-        despesas = db.list_despesas(user, ano_sel, mes_sel)
-
-    df_r = utils.receitas_para_dataframe(receitas)
-    df_d = utils.despesas_para_dataframe(despesas)
-
-    if modo == "Diário (dentro do mês)" and not df_d.empty:
-        dia_filtro = st.date_input("Selecione um dia específico (opcional)", value=None)
-        if dia_filtro:
-            df_d = df_d[df_d["data_compra"] == dia_filtro.isoformat()]
-            df_r = df_r[df_r["data"] == dia_filtro.isoformat()] if not df_r.empty else df_r
-
-    st.subheader("📥 Receitas")
-    st.dataframe(df_r, use_container_width=True, hide_index=True)
-    st.subheader("📤 Despesas")
-    st.dataframe(df_d, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("⬇️ Exportar dados")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        csv_buffer = io.StringIO()
-        df_export = pd.concat([
-            df_r.assign(tipo="Receita"),
-            df_d.rename(columns={"data_compra": "data"}).assign(tipo="Despesa")
-        ], ignore_index=True, sort=False)
-        df_export.to_csv(csv_buffer, index=False, sep=";", decimal=",")
-        st.download_button("📄 Baixar CSV", data=csv_buffer.getvalue(),
-                            file_name=f"financas_{ano_sel}_{mes_sel if modo != 'Anual' else 'ANO'}.csv",
-                            mime="text/csv")
-
-    with col2:
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-            df_r.to_excel(writer, sheet_name="Receitas", index=False)
-            df_d.to_excel(writer, sheet_name="Despesas", index=False)
-        st.download_button("📊 Baixar Excel", data=excel_buffer.getvalue(),
-                            file_name=f"financas_{ano_sel}_{mes_sel if modo != 'Anual' else 'ANO'}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-# ---------------------------------------------------------------------------
-# Página: CONFIGURAÇÕES
-# ---------------------------------------------------------------------------
-elif pagina == "⚙️ Configurações":
-    st.title("⚙️ Configurações Gerais")
-
-    st.subheader("🐷 Meta de Reserva / Investimentos")
-    percentual_atual = db.get_reserva_percentual()
-    novo_percentual = st.slider(
-        "Percentual de todas as receitas do mês a ser destinado automaticamente à reserva:",
-        min_value=0.0, max_value=100.0, value=float(percentual_atual), step=1.0
-    )
-    if st.button("💾 Salvar percentual de reserva"):
-        db.set_reserva_percentual(novo_percentual)
-        st.success(f"Reserva automática configurada para {novo_percentual:.1f}% das receitas.")
-
-    st.markdown("---")
-    st.subheader("🗄️ Status do Banco de Dados")
-    if db.usando_banco_em_nuvem():
-        st.success(db.get_backend_info())
-    else:
-        st.info(db.get_backend_info())
-        st.caption(
-            "Para ativar o banco em nuvem (Turso) e nunca mais perder dados ao reiniciar o app, "
-            "configure TURSO_DATABASE_URL e TURSO_AUTH_TOKEN em `.streamlit/secrets.toml` "
-            "(local) ou em 'Settings → Secrets' no Streamlit Community Cloud. "
-            "Veja o passo a passo no README.md."
-        )
-
-    st.markdown("---")
-    st.subheader("ℹ️ Sobre o sistema")
-    st.write(
-        "Sistema de Gestão Financeira Pessoal e Familiar — versão 1.2\n\n"
-        "- Modo local: SQLite (`financas.db`) na sua máquina.\n"
-        "- Modo nuvem: Turso (compatível com SQLite), sem perda de dados em reinícios.\n"
-        "- O sistema alterna automaticamente entre os dois, dependendo das credenciais configuradas."
-    )
-
-    st.markdown("---")
-    st.subheader("🔑 Trocar minha senha")
-    with st.form("form_trocar_senha", clear_on_submit=True):
-        nova_senha = st.text_input("Nova senha", type="password")
-        confirmar_senha = st.text_input("Confirmar nova senha", type="password")
-        if st.form_submit_button("Atualizar senha"):
-            if not nova_senha or len(nova_senha) < 4:
-                st.error("Informe uma senha com pelo menos 4 caracteres.")
-            elif nova_senha != confirmar_senha:
-                st.error("As senhas não conferem.")
-            else:
-                db.set_user_password(user.get("id"), nova_senha)
-                st.success("Senha atualizada com sucesso!")
-
-
-# ---------------------------------------------------------------------------
-# Pequena util para JSON seguro (evitar crash)
-# ---------------------------------------------------------------------------
-def json_safe(s):
-    if not s:
-        return None
+def enviar_email(destinatario, assunto, corpo):
+    """Envia e-mail via SMTP."""
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_REMETENTE
+    msg['To'] = destinatario
+    msg['Subject'] = assunto
+    msg.attach(MIMEText(corpo, 'html'))
     try:
-        return json.loads(s)
-    except Exception:
-        return s
+        server = smtplib.SMTP(SMTP_SERVIDOR, SMTP_PORTA)
+        server.starttls()
+        server.login(EMAIL_REMETENTE, EMAIL_SENHA)
+        server.sendmail(EMAIL_REMETENTE, destinatario, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Erro ao enviar e-mail: {e}")
+        return False
 
+# ============================================================
+# TEMPLATES HTML (embutidos para simplicidade)
+# ============================================================
+TEMPLATE_BASE = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ titulo }}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #f0f2f5; }
+        .container { max-width: 500px; margin: 60px auto; background: #fff;
+            padding: 40px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+        h1 { color: #1a73e8; margin-bottom: 25px; font-size: 1.5em; }
+        label { display: block; margin: 12px 0 5px; font-weight: 600; color: #333; }
+        input[type="text"], input[type="password"], input[type="email"] {
+            width: 100%; padding: 12px; border: 1px solid #ccc; border-radius: 8px; font-size: 1em; }
+        input:focus { outline: none; border-color: #1a73e8; }
+        button { width: 100%; padding: 14px; background: #1a73e8; color: #fff;
+            border: none; border-radius: 8px; font-size: 1em; cursor: pointer; margin-top: 20px; }
+        button:hover { background: #1557b0; }
+        .flash { padding: 12px; border-radius: 8px; margin-bottom: 15px; }
+        .flash-success { background: #d4edda; color: #155724; }
+        .flash-danger { background: #f8d7da; color: #721c24; }
+        .flash-info { background: #d1ecf1; color: #0c5460; }
+        a { color: #1a73e8; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .link { text-align: center; margin-top: 15px; }
+        .info { background: #e8f0fe; padding: 10px; border-radius: 8px; margin-top: 15px;
+            font-size: 0.85em; color: #333; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #1a73e8; color: #fff; }
+        .btn-small { padding: 6px 14px; font-size: 0.85em; }
+        .nav { margin-bottom: 20px; }
+        .nav a { margin-right: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash flash-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
+"""
 
-# ---------------------------------------------------------------------------
-# Admin (visível somente se is_admin True) - admins NÃO veem dados privados de outros usuários
-# ---------------------------------------------------------------------------
-if user.get("is_admin"):
-    st.markdown("---")
-    st.header("Admin — Gestão de Usuários e Auditoria (Apenas emails e logs são mostrados)")
-    users = db.fetch_all("SELECT id, email, is_admin, created_at FROM users ORDER BY created_at DESC")
-    st.subheader("Usuários (emails apenas)")
-    st.table(users)
-    st.subheader("Ações administrativas: criar usuário")
-    with st.form("admin_create_user"):
-        email_new = st.text_input("Email novo (admin)", key="adm_new_email")
-        senha_new = st.text_input("Senha (temporária)", key="adm_new_pass", type="password")
-        make_admin = st.checkbox("Tornar administrador?", value=False)
-        if st.form_submit_button("Criar usuário"):
-            try:
-                uid = db.create_user(email_new, senha_new, is_admin=make_admin)
-                st.success("Usuário criado com id " + str(uid))
-            except Exception as e:
-                st.error("Erro: " + str(e))
-    st.subheader("Logs de auditoria (últimas 200 entradas)")
-    logs = db.get_audit_logs(limit=200)
-    st.write(f"Mostrando {len(logs)} registros de auditoria")
-    for L in logs:
-        with st.expander(f"{L.get('timestamp')} — {L.get('action')} — {L.get('table_name')}"):
-            before = json_safe(L.get("before_json"))
-            after = json_safe(L.get("after_json"))
-            st.write("user_id:", L.get("user_id"), "row_id:", L.get("row_id"))
-            st.write("before:", before)
-            st.write("after:", after)
+TEMPLATE_CADASTRO = """
+{% extends "base" %}
+{% block content %}
+<h1>Criar Conta</h1>
+<form method="POST" action="/cadastro">
+    <label>Login (unico):</label>
+    <input type="text" name="login" required placeholder="Escolha seu login">
+    <label>E-mail:</label>
+    <input type="email" name="email" required placeholder="seu@email.com">
+    <label>Senha (ate 10 caracteres, letras e/ou numeros):</label>
+    <input type="password" name="senha" required maxlength="10" placeholder="********">
+    <button type="submit">Cadastrar</button>
+</form>
+<div class="link">Ja tem conta? <a href="/login">Fazer login</a></div>
+<div class="info">Suas credenciais sao isoladas. Nenhum outro usuario tem acesso aos seus dados.</div>
+{% endblock %}
+"""
+
+TEMPLATE_LOGIN = """
+{% extends "base" %}
+{% block content %}
+<h1>Entrar</h1>
+<form method="POST" action="/login">
+    <label>Login:</label>
+    <input type="text" name="login" required placeholder="Seu login">
+    <label>Senha:</label>
+    <input type="password" name="senha" required placeholder="********">
+    <button type="submit">Entrar</button>
+</form>
+<div class="link"><a href="/recuperar">Esqueceu a senha?</a></div>
+<div class="link">Nao tem conta? <a href="/cadastro">Criar conta</a></div>
+{% endblock %}
+"""
+
+TEMPLATE_DASHBOARD = """
+{% extends "base" %}
+{% block content %}
+<h1>Bem-vindo, {{ usuario_login }}!</h1>
+<p>Seu ID de usuario: <strong>{{ usuario_id }}</strong></p>
+<p>Sua sessao esta isolada. Nenhum dado de outros usuarios e acessivel.</p>
+<button onclick="window.location.href='/logout'">Sair</button>
+{% endblock %}
+"""
+
+TEMPLATE_ADMIN = """
+{% extends "base" %}
+{% block content %}
+<h1>Painel do Administrador</h1>
+<div class="nav">
+    <a href="/admin">Usuarios</a>
+    <a href="/logout">Sair</a>
+</div>
+<table>
+    <tr>
+        <th>ID</th>
+        <th>Login</th>
+        <th>E-mail</th>
+        <th>Cadastro</th>
+        <th>Reset de Senha</th>
+    </tr>
+    {% for u in usuarios %}
+    <tr>
+        <td>{{ u.id }}</td>
+        <td>{{ u.login }}</td>
+        <td>{{ u.email }}</td>
+        <td>{{ u.data_cadastro }}</td>
+        <td>
+            <form method="POST" action="/admin/reset/{{ u.id }}" style="display:inline;">
+                <button type="submit" class="btn-small">Reenviar troca de senha</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+<div class="info">As senhas dos usuarios NAO sao exibidas nem armazenadas em texto puro.
+Apenas o hash e guardado no banco de dados.</div>
+{% endblock %}
+"""
+
+TEMPLATE_RECUPERAR = """
+{% extends "base" %}
+{% block content %}
+<h1>Recuperar Senha</h1>
+<form method="POST" action="/recuperar">
+    <label>Digite seu e-mail cadastrado:</label>
+    <input type="email" name="email" required placeholder="seu@email.com">
+    <button type="submit">Enviar link de redefinicao</button>
+</form>
+<div class="link"><a href="/login">Voltar para login</a></div>
+{% endblock %}
+"""
+
+TEMPLATE_REDEFINIR = """
+{% extends "base" %}
+{% block content %}
+<h1>Redefinir Senha</h1>
+<form method="POST" action="/redefinir/{{ token }}">
+    <label>Nova senha (ate 10 caracteres):</label>
+    <input type="password" name="senha" required maxlength="10" placeholder="********">
+    <button type="submit">Redefinir</button>
+</form>
+{% endblock %}
+"""
+
+# ============================================================
+# ROTAS
+# ============================================================
+@app.route("/")
+def index():
+    return redirect(url_for("login"))
+
+@app.route("/cadastro", methods=["GET", "POST"])
+def cadastro():
+    if request.method == "POST":
+        login = request.form["login"].strip()
+        email = request.form["email"].strip()
+        senha = request.form["senha"]
+
+        valido, msg = validar_senha(senha)
+        if not valido:
+            flash(msg, "danger")
+            return redirect(url_for("cadastro"))
+
+        senha_hash = bcrypt.generate_password_hash(senha).decode("utf-8")
+        conn = get_db()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO usuarios (login, email, senha_hash, data_cadastro) VALUES (?, ?, ?, ?)",
+                (login, email, senha_hash, datetime.now().strftime("%d/%m/%Y %H:%M"))
+            )
+            conn.commit()
+            flash("Cadastro realizado com sucesso! Faca login.", "success")
+            return redirect(url_for("login"))
+        except sqlite3.IntegrityError:
+            flash("Este login ja existe. Escolha outro.", "danger")
+            return redirect(url_for("cadastro"))
+        finally:
+            conn.close()
+    return render_template_string(TEMPLATE_BASE.replace('{% block content %}{% endblock %}', '{% block content %}{% endblock %}'),
+                                  titulo="Cadastro", base=TEMPLATE_BASE) if False else            render_template_string(TEMPLATE_CADASTRO.replace('extends "base"', 'extends TEMPLATE_BASE') if False else
+                                  TEMPLATE_CADASTRO, titulo="Cadastro", TEMPLATE_BASE=TEMPLATE_BASE) if False else            render_template_string(TEMPLATE_BASE, titulo="Cadastro").replace('{% block content %}{% endblock %}', '')            if False else _render(TEMPLATE_CADASTRO, "Cadastro")
+
+def _render(template_content, titulo):
+    """Renderiza um template filho dentro do template base."""
+    # Substitui o bloco content do base pelo conteudo do template filho
+    # Extrai o conteudo dentro de {% block content %} ... {% endblock %}
+    start = template_content.find('{% block content %}') + len('{% block content %}')
+    end = template_content.find('{% endblock %}')
+    block_content = template_content[start:end]
+    full_template = TEMPLATE_BASE.replace('{% block content %}{% endblock %}', block_content)
+    return render_template_string(full_template, titulo=titulo)
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        login_input = request.form["login"].strip()
+        senha = request.form["senha"]
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM usuarios WHERE login = ?", (login_input,))
+        user = cursor.fetchone()
+        conn.close()
+        if user and bcrypt.check_password_hash(user["senha_hash"], senha):
+            session["usuario_id"] = user["id"]
+            session["usuario_login"] = user["login"]
+            flash("Login realizado com sucesso!", "success")
+            return redirect(url_for("dashboard"))
+        else:
+            flash("Login ou senha invalidos.", "danger")
+            return redirect(url_for("login"))
+    return _render(TEMPLATE_LOGIN, "Login")
+
+@app.route("/dashboard")
+def dashboard():
+    if "usuario_id" not in session:
+        flash("Voce precisa estar logado.", "danger")
+        return redirect(url_for("login"))
+    return _render(TEMPLATE_DASHBOARD, "Dashboard")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("Voce saiu do sistema.", "info")
+    return redirect(url_for("login"))
+
+@app.route("/admin")
+def admin():
+    if session.get("usuario_login") != "admin":
+        flash("Acesso restrito ao administrador.", "danger")
+        return redirect(url_for("login"))
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, login, email, data_cadastro FROM usuarios ORDER BY id")
+    usuarios = cursor.fetchall()
+    conn.close()
+    return _render(TEMPLATE_ADMIN.replace('{% extends "base" %}', '') if False else
+                   TEMPLATE_ADMIN, "Admin") if False else _render_admin(usuarios)
+
+def _render_admin(usuarios):
+    start = TEMPLATE_ADMIN.find('{% block content %}') + len('{% block content %}')
+    end = TEMPLATE_ADMIN.find('{% endblock %}')
+    block_content = TEMPLATE_ADMIN[start:end]
+    full_template = TEMPLATE_BASE.replace('{% block content %}{% endblock %}', block_content)
+    return render_template_string(full_template, titulo="Admin", usuarios=usuarios)
+
+@app.route("/admin/reset/<int:user_id>", methods=["POST"])
+def admin_reset(user_id):
+    if session.get("usuario_login") != "admin":
+        flash("Acesso restrito.", "danger")
+        return redirect(url_for("login"))
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT email FROM usuarios WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    if user:
+        token = secrets.token_urlsafe(32)
+        expira = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("UPDATE usuarios SET token_reset = ?, token_expira = ? WHERE id = ?",
+                       (token, expira, user_id))
+        conn.commit()
+        link = f"http://localhost:5000/redefinir/{token}"
+        corpo = f"""
+        <h2>Redefinicao de Senha</h2>
+        <p>Foi solicitada a redefinicao da sua senha.</p>
+        <p>Clique no link abaixo para criar uma nova senha:</p>
+        <p><a href="{link}">Redefinir minha senha</a></p>
+        <p>Este link expira em 1 hora.</p>
+        """
+        if enviar_email(user["email"], "Redefinicao de Senha", corpo):
+            flash(f"E-mail de redefinicao enviado para o usuario ID {user_id}.", "success")
+        else:
+            flash("Erro ao enviar e-mail. Verifique as configuracoes de SMTP.", "danger")
+    else:
+        flash("Usuario nao encontrado.", "danger")
+    conn.close()
+    return redirect(url_for("admin"))
+
+@app.route("/recuperar", methods=["GET", "POST"])
+def recuperar():
+    if request.method == "POST":
+        email = request.form["email"].strip()
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
+        user = cursor.fetchone()
+        if user:
+            token = secrets.token_urlsafe(32)
+            expira = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute("UPDATE usuarios SET token_reset = ?, token_expira = ? WHERE id = ?",
+                           (token, expira, user["id"]))
+            conn.commit()
+            link = f"http://localhost:5000/redefinir/{token}"
+            corpo = f"""
+            <h2>Recuperacao de Senha</h2>
+            <p>Voce solicitou a recuperacao de senha.</p>
+            <p><a href="{link}">Clique aqui para redefinir sua senha</a></p>
+            <p>Este link expira em 1 hora.</p>
+            """
+            if enviar_email(email, "Recuperacao de Senha", corpo):
+                flash("Link de recuperacao enviado para seu e-mail.", "success")
+            else:
+                flash("Erro ao enviar e-mail.", "danger")
+        else:
+            flash("Se o e-mail estiver cadastrado, voce recebera um link.", "info")
+        conn.close()
+        return redirect(url_for("login"))
+    return _render(TEMPLATE_RECUPERAR, "Recuperar Senha")
+
+@app.route("/redefinir/<token>", methods=["GET", "POST"])
+def redefinir(token):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM usuarios WHERE token_reset = ?", (token,))
+    user = cursor.fetchone()
+    if not user:
+        flash("Token invalido ou expirado.", "danger")
+        conn.close()
+        return redirect(url_for("login"))
+    expira = datetime.strptime(user["token_expira"], "%Y-%m-%d %H:%M:%S")
+    if datetime.now() > expira:
+        flash("Token expirado. Solicite novamente.", "danger")
+        conn.close()
+        return redirect(url_for("recuperar"))
+    if request.method == "POST":
+        nova_senha = request.form["senha"]
+        valido, msg = validar_senha(nova_senha)
+        if not valido:
+            flash(msg, "danger")
+            return redirect(url_for("redefinir", token=token))
+        nova_hash = bcrypt.generate_password_hash(nova_senha).decode("utf-8")
+        cursor.execute("UPDATE usuarios SET senha_hash = ?, token_reset = NULL, token_expira = NULL WHERE id = ?",
+                       (nova_hash, user["id"]))
+        conn.commit()
+        conn.close()
+        flash("Senha redefinida com sucesso! Faca login.", "success")
+        return redirect(url_for("login"))
+    conn.close()
+    start = TEMPLATE_REDEFINIR.find('{% block content %}') + len('{% block content %}')
+    end = TEMPLATE_REDEFINIR.find('{% endblock %}')
+    block_content = TEMPLATE_REDEFINIR[start:end]
+    full_template = TEMPLATE_BASE.replace('{% block content %}{% endblock %}', block_content)
+    return render_template_string(full_template, titulo="Redefinir Senha", token=token)
+
+# ============================================================
+# CRIAR USUARIO ADMIN PADRAO (executar uma vez)
+# ============================================================
+def criar_admin():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM usuarios WHERE login = 'admin'")
+    if not cursor.fetchone():
+        senha_hash = bcrypt.generate_password_hash("Admin123").decode("utf-8")
+        cursor.execute(
+            "INSERT INTO usuarios (login, email, senha_hash, data_cadastro) VALUES (?, ?, ?, ?)",
+            ("admin", "admin@sistema.com", senha_hash, datetime.now().strftime("%d/%m/%Y %H:%M"))
+        )
+        conn.commit()
+        print("Admin criado - Login: admin | Senha: Admin123")
+    conn.close()
+
+criar_admin()
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
