@@ -508,6 +508,42 @@ elif pagina == "💳 Cartões":
             "1ª parcela lançada automaticamente na fatura (competência) do **mês seguinte**."
         )
 
+    st.markdown("---")
+    st.subheader("🧾 Parcelamentos em Andamento")
+    st.caption(
+        "Toda compra parcelada no cartão (feita em '📤 Despesas', escolhendo "
+        "Cartão de Crédito e a quantidade de vezes) já entra automaticamente "
+        "aqui — não é preciso cadastrar de novo. Os valores abaixo consideram "
+        "o mês atual como referência."
+    )
+    parcelamentos = db.list_parcelamentos(user)
+    if not parcelamentos:
+        st.info("Nenhuma compra parcelada no cartão até o momento.")
+    else:
+        for p in parcelamentos:
+            titulo = f"{p['descricao']} — {p['cartao_nome'] or 'sem cartão'}"
+            if p["concluido"]:
+                titulo += " ✅ (quitada)"
+            with st.container(border=True):
+                st.markdown(f"**{titulo}**")
+                colx, coly, colz, colw = st.columns(4)
+                colx.metric("Valor total da compra", utils.formatar_moeda(p["valor_total"]))
+                coly.metric("Valor da parcela", utils.formatar_moeda(p["valor_parcela"]))
+                colz.metric("Parcelas pagas", f"{p['parcelas_pagas']} / {p['parcela_total']}")
+                colw.metric("Parcelas restantes", p["parcelas_restantes"])
+
+                progresso = p["parcelas_pagas"] / p["parcela_total"] if p["parcela_total"] else 0
+                st.progress(min(max(progresso, 0.0), 1.0))
+
+                if not p["concluido"]:
+                    st.caption(
+                        f"Faltam {utils.formatar_moeda(p['valor_restante'])} para quitar essa compra "
+                        f"({p['parcelas_restantes']} parcela(s) de {utils.formatar_moeda(p['valor_parcela'])})."
+                    )
+                else:
+                    st.caption("Compra totalmente quitada. 🎉")
+
+
 # ---------------------------------------------------------------------------
 # Página: CATEGORIAS E ORÇAMENTO
 # ---------------------------------------------------------------------------
