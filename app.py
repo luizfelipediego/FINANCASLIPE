@@ -68,113 +68,18 @@ def garantir_fixas_geradas(user, ano, mes):
 
 
 # -------------------------
-# Autenticação / sessão
+# Usuário local automático (login temporariamente desativado)
 # -------------------------
-def current_user():
-    return st.session_state.get("user")
-
-
-def require_login():
-    if current_user() is None:
-        st.warning("Faça login para usar o aplicativo.")
-        st.stop()
-
-
-def show_auth_sidebar():
-    st.sidebar.title("💳 Acesso")
-    if "user" not in st.session_state:
-        st.session_state["user"] = None
-
-    if st.session_state["user"]:
-        u = st.session_state["user"]
-        st.sidebar.write(f"Logado como: {u.get('email')}")
-        if u.get("is_admin"):
-            st.sidebar.info("Conta: Administrador (não vê dados privados de outros usuários)")
-        if st.sidebar.button("Sair"):
-            st.session_state["user"] = None
-            st.rerun()
-    else:
-        tab = st.sidebar.radio("Ação", ("Entrar", "Criar conta", "Esqueci minha senha"), index=0)
-        if tab == "Entrar":
-            email = st.sidebar.text_input("Email", key="login_email")
-            senha = st.sidebar.text_input("Senha", type="password", key="login_pass")
-            if st.sidebar.button("Entrar"):
-                try:
-                    u = db.authenticate_user(email, senha)
-                    if u:
-                        st.session_state["user"] = u
-                        st.rerun()
-                    else:
-                        st.sidebar.error("Credenciais inválidas")
-                except Exception as e:
-                    st.sidebar.error(f"Erro ao autenticar: {e}")
-        elif tab == "Criar conta":
-            email = st.sidebar.text_input("Email (novo)", key="reg_email")
-            senha = st.sidebar.text_input("Senha (nova)", type="password", key="reg_pass")
-            if st.sidebar.button("Criar conta"):
-                if not email or not senha:
-                    st.sidebar.error("Preencha email e senha.")
-                else:
-                    try:
-                        db.create_user(email, senha, is_admin=False)
-                        st.sidebar.success("Conta criada. Faça login.")
-                    except Exception as e:
-                        st.sidebar.error("Falha ao criar conta: " + str(e))
-        else:
-            # -------------------------------------------------------------
-            # Esqueci minha senha: 1) solicitar código por e-mail (válido
-            # por 1h) 2) informar o código + a nova senha.
-            # -------------------------------------------------------------
-            if "reset_email_solicitado" not in st.session_state:
-                st.session_state["reset_email_solicitado"] = None
-
-            st.sidebar.caption(
-                "Informe seu e-mail para receber um código de verificação "
-                "válido por 1 hora."
-            )
-            email_reset = st.sidebar.text_input(
-                "Email cadastrado", key="reset_email",
-                value=st.session_state["reset_email_solicitado"] or ""
-            )
-            if st.sidebar.button("Enviar código por e-mail"):
-                if not email_reset:
-                    st.sidebar.error("Informe seu e-mail.")
-                else:
-                    ok, msg = db.solicitar_redefinicao_senha(email_reset)
-                    if ok:
-                        st.session_state["reset_email_solicitado"] = email_reset
-                        st.sidebar.success(msg)
-                    else:
-                        st.sidebar.error(msg)
-
-            if st.session_state["reset_email_solicitado"]:
-                st.sidebar.markdown("---")
-                codigo = st.sidebar.text_input("Código recebido por e-mail", key="reset_codigo")
-                nova_senha = st.sidebar.text_input("Nova senha", type="password", key="reset_nova_senha")
-                confirmar = st.sidebar.text_input("Confirmar nova senha", type="password", key="reset_confirmar")
-                if st.sidebar.button("Redefinir senha"):
-                    if nova_senha != confirmar:
-                        st.sidebar.error("As senhas não conferem.")
-                    else:
-                        ok, msg = db.confirmar_redefinicao_senha(
-                            st.session_state["reset_email_solicitado"], codigo, nova_senha
-                        )
-                        if ok:
-                            st.sidebar.success(msg)
-                            st.session_state["reset_email_solicitado"] = None
-                        else:
-                            st.sidebar.error(msg)
-
-
-show_auth_sidebar()
+# A funcionalidade de contas/login/senha foi retirada de propósito para
+# deixar o app 100% funcional em modo single-user agora. O modelo de dados
+# (user_id em cada tabela) continua intacto, então basta reativar a tela de
+# autenticação mais adiante para voltar ao modo multi-conta sem precisar
+# mexer nas demais páginas.
+user = db.obter_ou_criar_usuario_padrao()
 
 # -------------------------
-# Sidebar / navegação (após auth)
+# Sidebar / navegação
 # -------------------------
-require_login()
-user = current_user()
-
-st.sidebar.markdown("---")
 st.sidebar.title("💰 Finanças da Família")
 pagina = st.sidebar.radio(
     "Navegação",
@@ -204,7 +109,6 @@ st.sidebar.caption("Esse período é usado no Dashboard, Relatórios e Orçament
 st.title("FINANCASLIPE — Painel")
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.markdown(f"**Usuário:** {user.get('email')}")
     mode = db.get_backend_info()
     st.markdown(f"**Backend:** {mode}")
 with col2:
@@ -735,14 +639,6 @@ elif pagina == "⚙️ Configurações":
             "(local) ou em 'Settings → Secrets' no Streamlit Community Cloud. "
             "Veja o passo a passo no README.md."
         )
-    st.markdown("---")
-    st.subheader("📧 E-mail para redefinição de senha (SMTP)")
-    st.caption(
-        "Para a opção 'Esqueci minha senha' funcionar, configure em "
-        "`.streamlit/secrets.toml` (local) ou em 'Settings → Secrets' (Streamlit Cloud) "
-        "as chaves: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` e `SMTP_PASS` de uma conta de "
-        "e-mail com envio via SMTP autorizado (ex.: Gmail com 'senha de app')."
-    )
 
     st.markdown("---")
     st.subheader("ℹ️ Sobre o sistema")
@@ -752,20 +648,6 @@ elif pagina == "⚙️ Configurações":
         "- Modo nuvem: Turso (compatível com SQLite), sem perda de dados em reinícios.\n"
         "- O sistema alterna automaticamente entre os dois, dependendo das credenciais configuradas."
     )
-
-    st.markdown("---")
-    st.subheader("🔑 Trocar minha senha")
-    with st.form("form_trocar_senha", clear_on_submit=True):
-        nova_senha = st.text_input("Nova senha", type="password")
-        confirmar_senha = st.text_input("Confirmar nova senha", type="password")
-        if st.form_submit_button("Atualizar senha"):
-            if not nova_senha or len(nova_senha) < 4:
-                st.error("Informe uma senha com pelo menos 4 caracteres.")
-            elif nova_senha != confirmar_senha:
-                st.error("As senhas não conferem.")
-            else:
-                db.set_user_password(user.get("id"), nova_senha)
-                st.success("Senha atualizada com sucesso!")
 
 
 # ---------------------------------------------------------------------------
@@ -781,32 +663,18 @@ def json_safe(s):
 
 
 # ---------------------------------------------------------------------------
-# Admin (visível somente se is_admin True) - admins NÃO veem dados privados de outros usuários
+# Histórico de alterações (auditoria) — visível a todos enquanto o app roda
+# em modo single-user (sem login).
 # ---------------------------------------------------------------------------
-if user.get("is_admin"):
+if pagina == "⚙️ Configurações":
     st.markdown("---")
-    st.header("Admin — Gestão de Usuários e Auditoria (Apenas emails e logs são mostrados)")
-    users = db.fetch_all("SELECT id, email, is_admin, created_at FROM users ORDER BY created_at DESC")
-    st.subheader("Usuários (emails apenas)")
-    st.table(users)
-    st.subheader("Ações administrativas: criar usuário")
-    with st.form("admin_create_user"):
-        email_new = st.text_input("Email novo (admin)", key="adm_new_email")
-        senha_new = st.text_input("Senha (temporária)", key="adm_new_pass", type="password")
-        make_admin = st.checkbox("Tornar administrador?", value=False)
-        if st.form_submit_button("Criar usuário"):
-            try:
-                uid = db.create_user(email_new, senha_new, is_admin=make_admin)
-                st.success("Usuário criado com id " + str(uid))
-            except Exception as e:
-                st.error("Erro: " + str(e))
-    st.subheader("Logs de auditoria (últimas 200 entradas)")
+    st.header("🗂️ Histórico de Alterações")
     logs = db.get_audit_logs(limit=200)
-    st.write(f"Mostrando {len(logs)} registros de auditoria")
+    st.write(f"Mostrando {len(logs)} registro(s) de auditoria")
     for L in logs:
         with st.expander(f"{L.get('timestamp')} — {L.get('action')} — {L.get('table_name')}"):
             before = json_safe(L.get("before_json"))
             after = json_safe(L.get("after_json"))
-            st.write("user_id:", L.get("user_id"), "row_id:", L.get("row_id"))
-            st.write("before:", before)
-            st.write("after:", after)
+            st.write("row_id:", L.get("row_id"))
+            st.write("antes:", before)
+            st.write("depois:", after)
