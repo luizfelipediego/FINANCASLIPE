@@ -1000,6 +1000,79 @@ def list_despesas(requesting_user: dict = None, ano: int = None, mes: int = None
     return fetch_all(sql, params)
 
 
+def list_parcelamentos(requesting_user: dict = None, referencia: date = None):
+    """
+    Resume todas as compras parceladas no cartão de crédito (parcela_total > 1)
+    do usuário, mostrando quanto já foi pago e quanto falta para quitar cada
+    uma, com base numa data de referência (por padrão, hoje).
+
+    Cada compra parcelada já tem TODAS as parcelas futuras gravadas em
+    'despesas' desde o momento da compra (feito em add_despesa) — não é
+    preciso "gerar" nada mês a mês, como acontece com despesas fixas. Aqui só
+    agrupamos essas parcelas por 'compra_grupo' e calculamos o andamento.
+    """
+    if not requesting_user:
+        return []
+    referencia = referencia or date.today()
+    ref_competencia = date(referencia.year, referencia.month, 1)
+
+    linhas = fetch_all("""
+        SELECT d.*, c.nome AS categoria_nome, ca.nome AS cartao_nome
+        FROM despesas d
+        LEFT JOIN categorias c ON d.categoria_id = c.id
+        LEFT JOIN cartoes ca ON d.cartao_id = ca.id
+        WHERE d.user_id = ? AND d.parcela_total > 1
+        ORDER BY d.compra_grupo, d.parcela_atual
+    """, (requesting_user.get("id"),))
+
+    grupos = {}
+    for row in linhas:
+        grupos.setdefault(row["compra_grupo"], []).append(row)
+
+    resultado = []
+    for grupo, rows in grupos.items():
+        rows_ordenadas = sorted(rows, key=lambda r: r["parcela_atual"])
+        primeira = rows_ordenadas[0]
+        parcela_total = primeira["parcela_total"]
+
+        valor_pago = 0.0
+        valor_restante = 0.0
+        parcelas_pagas = 0
+        for r in rows_ordenadas:
+            comp = datetime.strptime(r["data_competencia"], "%Y-%m-%d").date()
+            comp = date(comp.year, comp.month, 1)
+            if comp <= ref_competencia:
+                valor_pago = round(valor_pago + r["valor"], 2)
+                parcelas_pagas += 1
+            else:
+                valor_restante = round(valor_restante + r["valor"], 2)
+
+        parcelas_pagas = min(parcelas_pagas, parcela_total)
+        parcelas_restantes = max(parcela_total - parcelas_pagas, 0)
+        valor_total = round(valor_pago + valor_restante, 2)
+        valor_parcela = round(valor_total / parcela_total, 2) if parcela_total else 0.0
+
+        resultado.append({
+            "compra_grupo": grupo,
+            "descricao": primeira["descricao"],
+            "categoria_nome": primeira["categoria_nome"],
+            "cartao_nome": primeira["cartao_nome"],
+            "data_compra": primeira["data_compra"],
+            "valor_total": valor_total,
+            "valor_parcela": valor_parcela,
+            "parcela_total": parcela_total,
+            "parcelas_pagas": parcelas_pagas,
+            "parcelas_restantes": parcelas_restantes,
+            "valor_pago": valor_pago,
+            "valor_restante": valor_restante,
+            "concluido": parcelas_restantes == 0,
+        })
+
+    # Compras em andamento primeiro (mais parcelas restantes primeiro), concluídas por último
+    resultado.sort(key=lambda x: (x["concluido"], -x["parcelas_restantes"]))
+    return resultado
+
+
 def delete_despesa(despesa_id: int, requesting_user: dict):
     before = fetch_one("SELECT * FROM despesas WHERE id = ?", (despesa_id,))
     if not before or not _can_access_record(requesting_user, before.get("user_id")):
