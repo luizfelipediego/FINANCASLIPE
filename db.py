@@ -652,6 +652,25 @@ def get_user_by_id(user_id: int):
     return fetch_one("SELECT * FROM users WHERE id = ?", (user_id,))
 
 
+EMAIL_USUARIO_PADRAO = "local@financas.app"
+
+
+def obter_ou_criar_usuario_padrao():
+    """
+    Retorna o único usuário "local" usado enquanto a tela de login está
+    desativada, criando-o automaticamente na primeira execução. A senha
+    gerada é aleatória e nunca é usada (não existe tela de login neste modo).
+    Mantém o modelo de dados por user_id intacto, para que o login possa ser
+    reativado depois sem precisar migrar nada.
+    """
+    u = get_user_by_email(EMAIL_USUARIO_PADRAO)
+    if not u:
+        senha_aleatoria = secrets.token_urlsafe(24)
+        create_user(EMAIL_USUARIO_PADRAO, senha_aleatoria, is_admin=True)
+        u = get_user_by_email(EMAIL_USUARIO_PADRAO)
+    return {k: v for k, v in u.items() if k != "password_hash"}
+
+
 def authenticate_user(email: str, password: str):
     u = get_user_by_email(email)
     if not u:
