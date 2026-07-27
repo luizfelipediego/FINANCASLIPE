@@ -46,7 +46,7 @@ def _inicializar_banco_uma_vez():
 
 _inicializar_banco_uma_vez()
 
-FORMAS_PAGAMENTO = ["PIX", "Cartão de Crédito", "Cartão de Débito", "Dinheiro", "Transferência"]
+FORMAS_PAGAMENTO = ["PIX", "Cartão de Crédito", "Cartão de Débito", "Dinheiro", "Transferência", "Financiamento"]
 ORIGENS_RECEITA = ["Trabalho principal", "Renda Extra", "Rendimentos", "Outros"]
 
 HOJE = date.today()
@@ -65,6 +65,33 @@ def garantir_fixas_geradas(user, ano, mes):
     except Exception:
         # Nunca deixa a geração automática quebrar a navegação do usuário.
         pass
+
+
+def tabela_compras_df(lista):
+    """
+    Monta a MESMA estrutura de tabela usada nas três abas de acompanhamento
+    de compras (À Vista no Cartão / Parcelado no Cartão / Financiamentos),
+    a partir do resultado de db.list_compras_por_tipo.
+    """
+    colunas = ["Descrição", "Categoria", "Cartão/Forma", "Data Compra", "Valor Total",
+               "Valor Parcela", "Parcelas", "Restantes", "Valor Restante", "Situação"]
+    if not lista:
+        return pd.DataFrame(columns=colunas)
+    linhas = []
+    for p in lista:
+        linhas.append({
+            "Descrição": p["descricao"],
+            "Categoria": p["categoria_nome"] or "—",
+            "Cartão/Forma": p["cartao_nome"] or p["forma_pagamento"],
+            "Data Compra": p["data_compra"],
+            "Valor Total": utils.formatar_moeda(p["valor_total"]),
+            "Valor Parcela": utils.formatar_moeda(p["valor_parcela"]),
+            "Parcelas": f"{p['parcelas_pagas']}/{p['parcela_total']}",
+            "Restantes": p["parcelas_restantes"],
+            "Valor Restante": utils.formatar_moeda(p["valor_restante"]),
+            "Situação": "✅ Quitada" if p["concluido"] else "🟡 Em andamento",
+        })
+    return pd.DataFrame(linhas, columns=colunas)
 
 
 # -------------------------
@@ -87,8 +114,6 @@ pagina = st.sidebar.radio(
         "📊 Dashboard",
         "📥 Receitas",
         "📤 Despesas",
-        "🔁 Despesas Fixas",
-        "💳 Cartões",
         "🏷️ Categorias e Orçamento",
         "📁 Relatórios e Exportação",
         "⚙️ Configurações",
@@ -106,21 +131,18 @@ st.sidebar.caption("Esse período é usado no Dashboard, Relatórios e Orçament
 # -------------------------
 # Cabeçalho principal
 # -------------------------
-st.title("FINANCASLIPE — Painel")
-col1, col2 = st.columns([3, 1])
-with col1:
-    mode = db.get_backend_info()
-    st.markdown(f"**Backend:** {mode}")
-with col2:
-    if st.button("Fazer backup local agora"):
-        try:
-            path = db.backup_db()
-            if path:
-                st.success(f"Backup criado: {path}")
-            else:
-                st.warning("Backup não disponível para backend em nuvem.")
-        except Exception as e:
-            st.error("Erro ao criar backup: " + str(e))
+st.markdown(
+    """
+    <div style="background-color:#111111; color:#ffffff; padding:22px 28px;
+                border-radius:10px; border:1px solid #2a2a2a; margin-bottom:18px;">
+        <div style="font-size:26px; font-weight:700; letter-spacing:0.5px;">💰 Finanças da Família</div>
+        <div style="font-size:14px; color:#bdbdbd; margin-top:4px;">
+            Gestão financeira pessoal e familiar
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------------
 # Página: DASHBOARD
@@ -227,6 +249,28 @@ if pagina == "📊 Dashboard":
     if not algum_teto_definido:
         st.info("Nenhum teto de gasto configurado ainda. Defina em '🏷️ Categorias e Orçamento'.")
 
+    st.markdown("---")
+    st.subheader("📋 Acompanhamento de Compras")
+    st.caption(
+        "Tudo isso é preenchido automaticamente a partir do que você registra em "
+        "'📤 Despesas' — não precisa cadastrar de novo aqui."
+    )
+    tab_vista, tab_parcelado, tab_financ = st.tabs(
+        ["💳 À Vista no Cartão", "📦 Parcelado no Cartão", "🏦 Financiamentos"]
+    )
+    with tab_vista:
+        lista_vista = db.list_compras_por_tipo(user, forma_pagamento="Cartão de Crédito",
+                                                somente_parceladas=False)
+        st.dataframe(tabela_compras_df(lista_vista), use_container_width=True, hide_index=True)
+    with tab_parcelado:
+        lista_parcelado = db.list_compras_por_tipo(user, forma_pagamento="Cartão de Crédito",
+                                                    somente_parceladas=True)
+        st.dataframe(tabela_compras_df(lista_parcelado), use_container_width=True, hide_index=True)
+    with tab_financ:
+        lista_financ = db.list_compras_por_tipo(user, forma_pagamento="Financiamento")
+        st.dataframe(tabela_compras_df(lista_financ), use_container_width=True, hide_index=True)
+
+
 # ---------------------------------------------------------------------------
 # Página: RECEITAS
 # ---------------------------------------------------------------------------
@@ -273,275 +317,288 @@ elif pagina == "📥 Receitas":
                 st.error(str(e))
 
 # ---------------------------------------------------------------------------
-# Página: DESPESAS
+# Página: DESPESAS (com abas: Lançar Despesa, Despesas Fixas, Cartões)
 # ---------------------------------------------------------------------------
 elif pagina == "📤 Despesas":
     st.title("📤 Despesas (Saídas)")
-
-    categorias = db.list_categorias(user)
-    cartoes = db.list_cartoes(user)
-    nomes_categorias = {c["nome"]: c["id"] for c in categorias}
-
-    # Rótulo do cartão exibido junto com o selo do banco (se cadastrado)
-    def _rotulo_cartao(c):
-        selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
-        return f"{selo} — {c['nome']}" if selo else c["nome"]
-
-    nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
-
-    with st.form("form_despesa", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        data_compra = c1.date_input("Data da compra/despesa", value=HOJE)
-        descricao = c2.text_input("Descrição")
-
-        c3, c4 = st.columns(2)
-        categoria_nome = c3.selectbox("Categoria", list(nomes_categorias.keys()))
-        forma_pagamento = c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO)
-
-        cartao_nome = None
-        if forma_pagamento in ("Cartão de Crédito", "Cartão de Débito"):
-            if nomes_cartoes:
-                cartao_nome = st.selectbox("Cartão utilizado", list(nomes_cartoes.keys()))
-            else:
-                st.warning("Nenhum cartão cadastrado. Cadastre em '💳 Cartões'.")
-
-        c5, c6 = st.columns(2)
-        valor_total = c5.number_input("Valor total (R$)", min_value=0.0, step=10.0, format="%.2f")
-        parcelas = 1
-        if forma_pagamento == "Cartão de Crédito":
-            parcelas = c6.number_input("Quantidade de parcelas", min_value=1, max_value=48, value=1, step=1)
-
-        enviado = st.form_submit_button("➕ Registrar Despesa")
-
-        if enviado:
-            if valor_total <= 0:
-                st.error("Informe um valor maior que zero.")
-            elif not descricao.strip():
-                st.error("Informe uma descrição.")
-            else:
-                categoria_id = nomes_categorias.get(categoria_nome)
-                cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
-                db.add_despesa(data_compra, categoria_id, descricao, valor_total,
-                                forma_pagamento, cartao_id, parcelas, user_id=user.get("id"))
-
-                if parcelas > 1:
-                    cartao_row = next((c for c in cartoes if c["id"] == cartao_id), None)
-                    primeira = db.calcular_primeira_competencia(data_compra, forma_pagamento, cartao_row)
-                    st.success(
-                        f"Despesa parcelada em {parcelas}x registrada! "
-                        f"1ª parcela na competência de {utils.MESES_PT[primeira.month]}/{primeira.year}."
-                    )
-                else:
-                    st.success("Despesa registrada com sucesso!")
-
-    st.markdown("---")
-    st.subheader(f"Despesas — competência de {utils.MESES_PT[mes_sel]}/{ano_sel}")
-    garantir_fixas_geradas(user, ano_sel, mes_sel)
-    despesas = db.list_despesas(user, ano_sel, mes_sel)
-    df = utils.despesas_para_dataframe(despesas)
-    if df.empty:
-        st.info("Nenhuma despesa nesta competência.")
-    else:
-        df_show = df.copy()
-        df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
-        df_show["parcela"] = df_show["parcela_atual"].astype(str) + "/" + df_show["parcela_total"].astype(str)
-        df_show = df_show[["id", "data_compra", "categoria_nome", "descricao", "valor",
-                            "forma_pagamento", "cartao_nome", "parcela"]]
-        df_show.columns = ["ID", "Data Compra", "Categoria", "Descrição", "Valor",
-                            "Pagamento", "Cartão", "Parcela"]
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        id_excluir = st.selectbox("Excluir lançamento (selecione o ID)", [None] + df["id"].tolist())
-        if id_excluir:
-            colx, coly = st.columns(2)
-            if colx.button("🗑️ Excluir apenas esta parcela"):
-                try:
-                    db.delete_despesa(id_excluir, user)
-                    st.success("Parcela excluída.")
-                    st.rerun()
-                except PermissionError as e:
-                    st.error(str(e))
-            grupo = df.loc[df["id"] == id_excluir, "compra_grupo"].values[0]
-            if coly.button("🗑️ Excluir TODAS as parcelas desta compra"):
-                try:
-                    db.delete_grupo(grupo, user)
-                    st.success("Todas as parcelas da compra foram excluídas.")
-                    st.rerun()
-                except PermissionError as e:
-                    st.error(str(e))
-
-# ---------------------------------------------------------------------------
-# Página: DESPESAS FIXAS
-# ---------------------------------------------------------------------------
-elif pagina == "🔁 Despesas Fixas":
-    st.title("🔁 Despesas Fixas / Recorrentes")
-    st.caption("Ex.: Aluguel, Internet, Assinaturas. Gere os lançamentos do mês com um clique.")
-
-    categorias = db.list_categorias(user)
-    cartoes = db.list_cartoes(user)
-    nomes_categorias = {c["nome"]: c["id"] for c in categorias}
-
-    def _rotulo_cartao_fixa(c):
-        selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
-        return f"{selo} — {c['nome']}" if selo else c["nome"]
-
-    nomes_cartoes = {_rotulo_cartao_fixa(c): c["id"] for c in cartoes}
-
-    with st.form("form_fixa", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        descricao = c1.text_input("Descrição (ex: Aluguel)")
-        categoria_nome = c2.selectbox("Categoria", list(nomes_categorias.keys()))
-
-        c3, c4, c5 = st.columns(3)
-        valor = c3.number_input("Valor mensal (R$)", min_value=0.0, step=10.0, format="%.2f")
-        forma_pagamento = c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO)
-        dia_vencimento = c5.number_input("Dia de vencimento", min_value=1, max_value=28, value=5)
-
-        cartao_nome = None
-        if forma_pagamento in ("Cartão de Crédito", "Cartão de Débito") and nomes_cartoes:
-            cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()))
-
-        enviado = st.form_submit_button("➕ Cadastrar Despesa Fixa")
-        if enviado:
-            if not descricao.strip() or valor <= 0:
-                st.error("Preencha descrição e valor corretamente.")
-            else:
-                cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
-                db.add_despesa_fixa(descricao, nomes_categorias[categoria_nome], valor,
-                                     forma_pagamento, cartao_id, dia_vencimento, user_id=user.get("id"))
-                st.success("Despesa fixa cadastrada!")
-
-    st.markdown("---")
-    st.subheader("Despesas fixas cadastradas")
-    fixas = db.list_despesas_fixas(user, somente_ativas=False)
-    if not fixas:
-        st.info("Nenhuma despesa fixa cadastrada.")
-    else:
-        df_fixas = pd.DataFrame([dict(f) for f in fixas])
-        df_show = df_fixas[["id", "descricao", "categoria_nome", "valor",
-                             "forma_pagamento", "dia_vencimento", "ativa"]].copy()
-        df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
-        df_show["ativa"] = df_show["ativa"].apply(lambda x: "✅ Ativa" if x else "⏸️ Pausada")
-        df_show.columns = ["ID", "Descrição", "Categoria", "Valor", "Pagamento", "Dia Venc.", "Status"]
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        col1, col2, col3 = st.columns(3)
-        id_alvo = col1.selectbox("Selecionar ID para ação", df_fixas["id"].tolist())
-        if col2.button("⏸️ Pausar / ▶️ Reativar"):
-            try:
-                atual = df_fixas.loc[df_fixas["id"] == id_alvo, "ativa"].values[0]
-                db.set_despesa_fixa_ativa(id_alvo, not atual, user)
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
-        if col3.button("🗑️ Excluir cadastro"):
-            try:
-                db.delete_despesa_fixa(id_alvo, user)
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
-
-    st.markdown("---")
-    st.subheader(f"Lançamentos do mês selecionado ({utils.MESES_PT[mes_sel]}/{ano_sel})")
-    st.caption("As despesas fixas ativas já são contabilizadas automaticamente no Dashboard, "
-               "nas Despesas e nos Relatórios assim que você entra nessas páginas. "
-               "Use o botão abaixo apenas se quiser forçar a atualização agora mesmo, "
-               "por exemplo logo após cadastrar uma nova despesa fixa.")
-    if st.button("🔁 Atualizar lançamentos agora"):
-        qtd = db.gerar_despesas_fixas_do_mes(ano_sel, mes_sel, requesting_user=user)
-        if qtd > 0:
-            st.success(f"{qtd} lançamento(s) gerado(s) para {utils.MESES_PT[mes_sel]}/{ano_sel}.")
-        else:
-            st.info("Todos os lançamentos deste mês já haviam sido gerados anteriormente.")
-
-# ---------------------------------------------------------------------------
-# Página: CARTÕES
-# ---------------------------------------------------------------------------
-elif pagina == "💳 Cartões":
-    st.title("💳 Gestão de Cartões de Crédito")
     st.caption(
-        "O selo abaixo (emoji colorido) é apenas uma identificação visual — não reproduz "
-        "a logomarca oficial de nenhum banco, já que são marcas registradas."
+        "Tudo o que você lançar aqui — seja uma despesa avulsa, uma despesa fixa "
+        "gerada automaticamente ou uma compra no cartão — soma no mesmo total de "
+        "despesas do Dashboard e dos Relatórios. Nada disso muda entre as abas abaixo."
     )
 
-    with st.form("form_cartao", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        banco = c1.selectbox("Banco / Instituição", list(utils.BANCOS_EMOJI.keys()),
-                              format_func=lambda b: utils.BANCOS_EMOJI[b])
-        nome = c2.text_input("Apelido do cartão (ex: Nubank Roxinho, Itaú Platinum)")
+    tab_lancar, tab_fixas, tab_cartoes = st.tabs(
+        ["📝 Lançar Despesa", "🔁 Despesas Fixas", "💳 Cartões"]
+    )
 
-        c3, c4 = st.columns(2)
-        dia_fechamento = c3.number_input("Dia de fechamento da fatura", min_value=1, max_value=28, value=25)
-        dia_vencimento = c4.number_input("Dia de vencimento da fatura", min_value=1, max_value=28, value=5)
-        enviado = st.form_submit_button("➕ Cadastrar Cartão")
-        if enviado:
-            if not nome.strip():
-                st.error("Informe o apelido do cartão.")
-            else:
+    # -----------------------------------------------------------------
+    # Aba: Lançar Despesa (avulsa, parcelada, financiamento, etc.)
+    # -----------------------------------------------------------------
+    with tab_lancar:
+        categorias = db.list_categorias(user)
+        cartoes = db.list_cartoes(user)
+        nomes_categorias = {c["nome"]: c["id"] for c in categorias}
+
+        # Rótulo do cartão exibido junto com o selo do banco (se cadastrado)
+        def _rotulo_cartao(c):
+            selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
+            return f"{selo} — {c['nome']}" if selo else c["nome"]
+
+        nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
+
+        with st.form("form_despesa", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            data_compra = c1.date_input("Data da compra/despesa", value=HOJE)
+            descricao = c2.text_input("Descrição")
+
+            c3, c4 = st.columns(2)
+            categoria_nome = c3.selectbox("Categoria", list(nomes_categorias.keys()))
+            forma_pagamento = c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO)
+
+            cartao_nome = None
+            if forma_pagamento in ("Cartão de Crédito", "Cartão de Débito"):
+                if nomes_cartoes:
+                    cartao_nome = st.selectbox("Cartão utilizado", list(nomes_cartoes.keys()))
+                else:
+                    st.warning("Nenhum cartão cadastrado. Cadastre na aba '💳 Cartões' aqui ao lado.")
+
+            c5, c6 = st.columns(2)
+            valor_total = c5.number_input("Valor total (R$)", min_value=0.0, step=10.0, format="%.2f")
+            parcelas = 1
+            if forma_pagamento in ("Cartão de Crédito", "Financiamento"):
+                max_parcelas = 48 if forma_pagamento == "Cartão de Crédito" else 420
+                parcelas = c6.number_input("Quantidade de parcelas", min_value=1, max_value=max_parcelas,
+                                            value=1, step=1)
+
+            enviado = st.form_submit_button("➕ Registrar Despesa")
+
+            if enviado:
+                if valor_total <= 0:
+                    st.error("Informe um valor maior que zero.")
+                elif not descricao.strip():
+                    st.error("Informe uma descrição.")
+                else:
+                    categoria_id = nomes_categorias.get(categoria_nome)
+                    cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
+                    db.add_despesa(data_compra, categoria_id, descricao, valor_total,
+                                    forma_pagamento, cartao_id, parcelas, user_id=user.get("id"))
+
+                    if parcelas > 1:
+                        cartao_row = next((c for c in cartoes if c["id"] == cartao_id), None)
+                        primeira = db.calcular_primeira_competencia(data_compra, forma_pagamento, cartao_row)
+                        st.success(
+                            f"Despesa parcelada em {parcelas}x registrada! "
+                            f"1ª parcela na competência de {utils.MESES_PT[primeira.month]}/{primeira.year}."
+                        )
+                    else:
+                        st.success("Despesa registrada com sucesso!")
+
+        st.markdown("---")
+        st.subheader(f"Despesas — competência de {utils.MESES_PT[mes_sel]}/{ano_sel}")
+        garantir_fixas_geradas(user, ano_sel, mes_sel)
+        despesas = db.list_despesas(user, ano_sel, mes_sel)
+        df = utils.despesas_para_dataframe(despesas)
+        if df.empty:
+            st.info("Nenhuma despesa nesta competência.")
+        else:
+            df_show = df.copy()
+            df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
+            df_show["parcela"] = df_show["parcela_atual"].astype(str) + "/" + df_show["parcela_total"].astype(str)
+            df_show = df_show[["id", "data_compra", "categoria_nome", "descricao", "valor",
+                                "forma_pagamento", "cartao_nome", "parcela"]]
+            df_show.columns = ["ID", "Data Compra", "Categoria", "Descrição", "Valor",
+                                "Pagamento", "Cartão", "Parcela"]
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+            id_excluir = st.selectbox("Excluir lançamento (selecione o ID)", [None] + df["id"].tolist())
+            if id_excluir:
+                colx, coly = st.columns(2)
+                if colx.button("🗑️ Excluir apenas esta parcela"):
+                    try:
+                        db.delete_despesa(id_excluir, user)
+                        st.success("Parcela excluída.")
+                        st.rerun()
+                    except PermissionError as e:
+                        st.error(str(e))
+                grupo = df.loc[df["id"] == id_excluir, "compra_grupo"].values[0]
+                if coly.button("🗑️ Excluir TODAS as parcelas desta compra"):
+                    try:
+                        db.delete_grupo(grupo, user)
+                        st.success("Todas as parcelas da compra foram excluídas.")
+                        st.rerun()
+                    except PermissionError as e:
+                        st.error(str(e))
+
+    # -----------------------------------------------------------------
+    # Aba: Despesas Fixas / Recorrentes
+    # -----------------------------------------------------------------
+    with tab_fixas:
+        st.caption("Ex.: Aluguel, Internet, Assinaturas. Gere os lançamentos do mês com um clique.")
+
+        categorias = db.list_categorias(user)
+        cartoes = db.list_cartoes(user)
+        nomes_categorias = {c["nome"]: c["id"] for c in categorias}
+
+        def _rotulo_cartao_fixa(c):
+            selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
+            return f"{selo} — {c['nome']}" if selo else c["nome"]
+
+        nomes_cartoes = {_rotulo_cartao_fixa(c): c["id"] for c in cartoes}
+
+        with st.form("form_fixa", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            descricao = c1.text_input("Descrição (ex: Aluguel)")
+            categoria_nome = c2.selectbox("Categoria", list(nomes_categorias.keys()))
+
+            c3, c4, c5 = st.columns(3)
+            valor = c3.number_input("Valor mensal (R$)", min_value=0.0, step=10.0, format="%.2f")
+            forma_pagamento = c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO)
+            dia_vencimento = c5.number_input("Dia de vencimento", min_value=1, max_value=28, value=5)
+
+            cartao_nome = None
+            if forma_pagamento in ("Cartão de Crédito", "Cartão de Débito") and nomes_cartoes:
+                cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()))
+
+            enviado = st.form_submit_button("➕ Cadastrar Despesa Fixa")
+            if enviado:
+                if not descricao.strip() or valor <= 0:
+                    st.error("Preencha descrição e valor corretamente.")
+                else:
+                    cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
+                    db.add_despesa_fixa(descricao, nomes_categorias[categoria_nome], valor,
+                                         forma_pagamento, cartao_id, dia_vencimento, user_id=user.get("id"))
+                    st.success("Despesa fixa cadastrada!")
+
+        st.markdown("---")
+        st.subheader("Despesas fixas cadastradas")
+        fixas = db.list_despesas_fixas(user, somente_ativas=False)
+        if not fixas:
+            st.info("Nenhuma despesa fixa cadastrada.")
+        else:
+            df_fixas = pd.DataFrame([dict(f) for f in fixas])
+            df_show = df_fixas[["id", "descricao", "categoria_nome", "valor",
+                                 "forma_pagamento", "dia_vencimento", "ativa"]].copy()
+            df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
+            df_show["ativa"] = df_show["ativa"].apply(lambda x: "✅ Ativa" if x else "⏸️ Pausada")
+            df_show.columns = ["ID", "Descrição", "Categoria", "Valor", "Pagamento", "Dia Venc.", "Status"]
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+            col1, col2, col3 = st.columns(3)
+            id_alvo = col1.selectbox("Selecionar ID para ação", df_fixas["id"].tolist())
+            if col2.button("⏸️ Pausar / ▶️ Reativar"):
                 try:
-                    db.add_cartao(nome, dia_fechamento, dia_vencimento, banco=banco, user_id=user.get("id"))
-                    st.success(f"Cartão {utils.BANCOS_EMOJI[banco]} cadastrado!")
-                except Exception:
-                    st.error("Já existe um cartão com esse nome.")
+                    atual = df_fixas.loc[df_fixas["id"] == id_alvo, "ativa"].values[0]
+                    db.set_despesa_fixa_ativa(id_alvo, not atual, user)
+                    st.rerun()
+                except PermissionError as e:
+                    st.error(str(e))
+            if col3.button("🗑️ Excluir cadastro"):
+                try:
+                    db.delete_despesa_fixa(id_alvo, user)
+                    st.rerun()
+                except PermissionError as e:
+                    st.error(str(e))
 
-    st.markdown("---")
-    cartoes = db.list_cartoes(user)
-    if not cartoes:
-        st.info("Nenhum cartão cadastrado ainda.")
-    else:
-        df = utils.cartoes_para_dataframe(cartoes)
-        df_show = df.copy()
-        df_show["banco"] = df_show["banco"].apply(lambda b: utils.BANCOS_EMOJI.get(b, b or "—"))
-        df_show.columns = ["ID", "Banco", "Nome", "Dia Fechamento", "Dia Vencimento"]
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader(f"Lançamentos do mês selecionado ({utils.MESES_PT[mes_sel]}/{ano_sel})")
+        st.caption("As despesas fixas ativas já são contabilizadas automaticamente no Dashboard, "
+                   "nas Despesas e nos Relatórios assim que você entra nessas páginas. "
+                   "Use o botão abaixo apenas se quiser forçar a atualização agora mesmo, "
+                   "por exemplo logo após cadastrar uma nova despesa fixa.")
+        if st.button("🔁 Atualizar lançamentos agora"):
+            qtd = db.gerar_despesas_fixas_do_mes(ano_sel, mes_sel, requesting_user=user)
+            if qtd > 0:
+                st.success(f"{qtd} lançamento(s) gerado(s) para {utils.MESES_PT[mes_sel]}/{ano_sel}.")
+            else:
+                st.info("Todos os lançamentos deste mês já haviam sido gerados anteriormente.")
 
-        id_excluir = st.selectbox("Excluir cartão (ID)", [None] + [c["id"] for c in cartoes])
-        if id_excluir and st.button("🗑️ Excluir cartão"):
-            try:
-                db.delete_cartao(id_excluir, user)
-                st.rerun()
-            except PermissionError as e:
-                st.error(str(e))
-
-        st.info(
-            "📌 **Regra de fechamento:** compras feitas *após* o dia de fechamento têm a "
-            "1ª parcela lançada automaticamente na fatura (competência) do **mês seguinte**."
+    # -----------------------------------------------------------------
+    # Aba: Cartões de Crédito
+    # -----------------------------------------------------------------
+    with tab_cartoes:
+        st.caption(
+            "O selo abaixo (emoji colorido) é apenas uma identificação visual — não reproduz "
+            "a logomarca oficial de nenhum banco, já que são marcas registradas."
         )
 
-    st.markdown("---")
-    st.subheader("🧾 Parcelamentos em Andamento")
-    st.caption(
-        "Toda compra parcelada no cartão (feita em '📤 Despesas', escolhendo "
-        "Cartão de Crédito e a quantidade de vezes) já entra automaticamente "
-        "aqui — não é preciso cadastrar de novo. Os valores abaixo consideram "
-        "o mês atual como referência."
-    )
-    parcelamentos = db.list_parcelamentos(user)
-    if not parcelamentos:
-        st.info("Nenhuma compra parcelada no cartão até o momento.")
-    else:
-        for p in parcelamentos:
-            titulo = f"{p['descricao']} — {p['cartao_nome'] or 'sem cartão'}"
-            if p["concluido"]:
-                titulo += " ✅ (quitada)"
-            with st.container(border=True):
-                st.markdown(f"**{titulo}**")
-                colx, coly, colz, colw = st.columns(4)
-                colx.metric("Valor total da compra", utils.formatar_moeda(p["valor_total"]))
-                coly.metric("Valor da parcela", utils.formatar_moeda(p["valor_parcela"]))
-                colz.metric("Parcelas pagas", f"{p['parcelas_pagas']} / {p['parcela_total']}")
-                colw.metric("Parcelas restantes", p["parcelas_restantes"])
+        with st.form("form_cartao", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            banco = c1.selectbox("Banco / Instituição", list(utils.BANCOS_EMOJI.keys()),
+                                  format_func=lambda b: utils.BANCOS_EMOJI[b])
+            nome = c2.text_input("Apelido do cartão (ex: Nubank Roxinho, Itaú Platinum)")
 
-                progresso = p["parcelas_pagas"] / p["parcela_total"] if p["parcela_total"] else 0
-                st.progress(min(max(progresso, 0.0), 1.0))
-
-                if not p["concluido"]:
-                    st.caption(
-                        f"Faltam {utils.formatar_moeda(p['valor_restante'])} para quitar essa compra "
-                        f"({p['parcelas_restantes']} parcela(s) de {utils.formatar_moeda(p['valor_parcela'])})."
-                    )
+            c3, c4 = st.columns(2)
+            dia_fechamento = c3.number_input("Dia de fechamento da fatura", min_value=1, max_value=28, value=25)
+            dia_vencimento = c4.number_input("Dia de vencimento da fatura", min_value=1, max_value=28, value=5)
+            enviado = st.form_submit_button("➕ Cadastrar Cartão")
+            if enviado:
+                if not nome.strip():
+                    st.error("Informe o apelido do cartão.")
                 else:
-                    st.caption("Compra totalmente quitada. 🎉")
+                    try:
+                        db.add_cartao(nome, dia_fechamento, dia_vencimento, banco=banco, user_id=user.get("id"))
+                        st.success(f"Cartão {utils.BANCOS_EMOJI[banco]} cadastrado!")
+                    except Exception:
+                        st.error("Já existe um cartão com esse nome.")
+
+        st.markdown("---")
+        cartoes_cad = db.list_cartoes(user)
+        if not cartoes_cad:
+            st.info("Nenhum cartão cadastrado ainda.")
+        else:
+            df = utils.cartoes_para_dataframe(cartoes_cad)
+            df_show = df.copy()
+            df_show["banco"] = df_show["banco"].apply(lambda b: utils.BANCOS_EMOJI.get(b, b or "—"))
+            df_show.columns = ["ID", "Banco", "Nome", "Dia Fechamento", "Dia Vencimento"]
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+            id_excluir = st.selectbox("Excluir cartão (ID)", [None] + [c["id"] for c in cartoes_cad])
+            if id_excluir and st.button("🗑️ Excluir cartão"):
+                try:
+                    db.delete_cartao(id_excluir, user)
+                    st.rerun()
+                except (PermissionError, db.RegistroVinculadoError) as e:
+                    st.error(str(e))
+
+            st.info(
+                "📌 **Regra de fechamento:** compras feitas *após* o dia de fechamento têm a "
+                "1ª parcela lançada automaticamente na fatura (competência) do **mês seguinte**."
+            )
+
+        st.markdown("---")
+        st.subheader("🧾 Parcelamentos em Andamento")
+        st.caption(
+            "Toda compra parcelada no cartão (feita na aba '📝 Lançar Despesa', escolhendo "
+            "Cartão de Crédito e a quantidade de vezes) já entra automaticamente "
+            "aqui — não é preciso cadastrar de novo. Os valores abaixo consideram "
+            "o mês atual como referência."
+        )
+        parcelamentos = db.list_parcelamentos(user)
+        if not parcelamentos:
+            st.info("Nenhuma compra parcelada no cartão até o momento.")
+        else:
+            for p in parcelamentos:
+                titulo = f"{p['descricao']} — {p['cartao_nome'] or 'sem cartão'}"
+                if p["concluido"]:
+                    titulo += " ✅ (quitada)"
+                with st.container(border=True):
+                    st.markdown(f"**{titulo}**")
+                    colx, coly, colz, colw = st.columns(4)
+                    colx.metric("Valor total da compra", utils.formatar_moeda(p["valor_total"]))
+                    coly.metric("Valor da parcela", utils.formatar_moeda(p["valor_parcela"]))
+                    colz.metric("Parcelas pagas", f"{p['parcelas_pagas']} / {p['parcela_total']}")
+                    colw.metric("Parcelas restantes", p["parcelas_restantes"])
+
+                    progresso = p["parcelas_pagas"] / p["parcela_total"] if p["parcela_total"] else 0
+                    st.progress(min(max(progresso, 0.0), 1.0))
+
+                    if not p["concluido"]:
+                        st.caption(
+                            f"Faltam {utils.formatar_moeda(p['valor_restante'])} para quitar essa compra "
+                            f"({p['parcelas_restantes']} parcela(s) de {utils.formatar_moeda(p['valor_parcela'])})."
+                        )
+                    else:
+                        st.caption("Compra totalmente quitada. 🎉")
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +645,7 @@ elif pagina == "🏷️ Categorias e Orçamento":
         try:
             db.delete_categoria(id_excluir, requesting_user=user)
             st.rerun()
-        except PermissionError as e:
+        except (PermissionError, db.RegistroVinculadoError) as e:
             st.error(str(e))
 
 # ---------------------------------------------------------------------------
@@ -675,6 +732,15 @@ elif pagina == "⚙️ Configurações":
             "(local) ou em 'Settings → Secrets' no Streamlit Community Cloud. "
             "Veja o passo a passo no README.md."
         )
+    if st.button("💾 Fazer backup local agora"):
+        try:
+            path = db.backup_db()
+            if path:
+                st.success(f"Backup criado: {path}")
+            else:
+                st.warning("Backup não disponível para backend em nuvem.")
+        except Exception as e:
+            st.error("Erro ao criar backup: " + str(e))
 
     st.markdown("---")
     st.subheader("ℹ️ Sobre o sistema")
