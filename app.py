@@ -288,12 +288,15 @@ elif pagina == "📥 Receitas":
             if valor <= 0:
                 st.error("Informe um valor maior que zero.")
             else:
-                db.add_receita(data_receita.isoformat(), origem, valor, observacao, user_id=user.get("id"))
-                perc = db.get_reserva_percentual()
-                st.success(
-                    f"Receita registrada! Reserva automática ({perc:.1f}%): "
-                    f"{utils.formatar_moeda(valor * perc / 100)}"
-                )
+                try:
+                    db.add_receita(data_receita.isoformat(), origem, valor, observacao, user_id=user.get("id"))
+                    perc = db.get_reserva_percentual()
+                    st.success(
+                        f"Receita registrada! Reserva automática ({perc:.1f}%): "
+                        f"{utils.formatar_moeda(valor * perc / 100)}"
+                    )
+                except Exception as e:
+                    st.error(f"Não foi possível registrar a receita: {e}")
 
     st.markdown("---")
     st.subheader(f"Receitas de {utils.MESES_PT[mes_sel]}/{ano_sel}")
@@ -378,20 +381,23 @@ elif pagina == "📤 Despesas":
                 elif not descricao.strip():
                     st.error("Informe uma descrição.")
                 else:
-                    categoria_id = nomes_categorias.get(categoria_nome)
-                    cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
-                    db.add_despesa(data_compra, categoria_id, descricao, valor_total,
-                                    forma_pagamento, cartao_id, parcelas, user_id=user.get("id"))
+                    try:
+                        categoria_id = nomes_categorias.get(categoria_nome)
+                        cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
+                        db.add_despesa(data_compra, categoria_id, descricao, valor_total,
+                                        forma_pagamento, cartao_id, parcelas, user_id=user.get("id"))
 
-                    if parcelas > 1:
-                        cartao_row = next((c for c in cartoes if c["id"] == cartao_id), None)
-                        primeira = db.calcular_primeira_competencia(data_compra, forma_pagamento, cartao_row)
-                        st.success(
-                            f"Despesa parcelada em {parcelas}x registrada! "
-                            f"1ª parcela na competência de {utils.MESES_PT[primeira.month]}/{primeira.year}."
-                        )
-                    else:
-                        st.success("Despesa registrada com sucesso!")
+                        if parcelas > 1:
+                            cartao_row = next((c for c in cartoes if c["id"] == cartao_id), None)
+                            primeira = db.calcular_primeira_competencia(data_compra, forma_pagamento, cartao_row)
+                            st.success(
+                                f"Despesa parcelada em {parcelas}x registrada! "
+                                f"1ª parcela na competência de {utils.MESES_PT[primeira.month]}/{primeira.year}."
+                            )
+                        else:
+                            st.success("Despesa registrada com sucesso!")
+                    except Exception as e:
+                        st.error(f"Não foi possível registrar a despesa: {e}")
 
         st.markdown("---")
         st.subheader(f"Despesas — competência de {utils.MESES_PT[mes_sel]}/{ano_sel}")
@@ -464,10 +470,13 @@ elif pagina == "📤 Despesas":
                 if not descricao.strip() or valor <= 0:
                     st.error("Preencha descrição e valor corretamente.")
                 else:
-                    cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
-                    db.add_despesa_fixa(descricao, nomes_categorias[categoria_nome], valor,
-                                         forma_pagamento, cartao_id, dia_vencimento, user_id=user.get("id"))
-                    st.success("Despesa fixa cadastrada!")
+                    try:
+                        cartao_id = nomes_cartoes.get(cartao_nome) if cartao_nome else None
+                        db.add_despesa_fixa(descricao, nomes_categorias[categoria_nome], valor,
+                                             forma_pagamento, cartao_id, dia_vencimento, user_id=user.get("id"))
+                        st.success("Despesa fixa cadastrada!")
+                    except Exception as e:
+                        st.error(f"Não foi possível cadastrar a despesa fixa: {e}")
 
         st.markdown("---")
         st.subheader("Despesas fixas cadastradas")
