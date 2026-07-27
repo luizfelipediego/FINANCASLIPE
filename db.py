@@ -549,6 +549,7 @@ def _migrar_categorias_remover_unique_global():
     if not _tabela_tem_unique_em_coluna("categorias", "nome"):
         return
     try:
+        execute("DROP TABLE IF EXISTS categorias_migracao_old")
         execute("ALTER TABLE categorias RENAME TO categorias_migracao_old")
         execute("""
             CREATE TABLE categorias (
@@ -563,10 +564,10 @@ def _migrar_categorias_remover_unique_global():
             SELECT id, nome, teto_mensal, user_id FROM categorias_migracao_old
         """)
         execute("DROP TABLE categorias_migracao_old")
-    except Exception:
-        # Não derruba o app por uma falha na migração; será tentada de novo
-        # na próxima inicialização.
-        pass
+    except Exception as e:
+        # Não derruba o app por uma falha na migração; registra nos logs do
+        # servidor para diagnóstico e será tentada de novo na próxima vez.
+        print(f"[MIGRAÇÃO] Falha ao migrar 'categorias': {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def _migrar_cartoes_remover_unique_global():
@@ -574,6 +575,7 @@ def _migrar_cartoes_remover_unique_global():
     if not _tabela_tem_unique_em_coluna("cartoes", "nome"):
         return
     try:
+        execute("DROP TABLE IF EXISTS cartoes_migracao_old")
         execute("ALTER TABLE cartoes RENAME TO cartoes_migracao_old")
         execute("""
             CREATE TABLE cartoes (
@@ -590,8 +592,8 @@ def _migrar_cartoes_remover_unique_global():
             SELECT id, nome, dia_fechamento, dia_vencimento, user_id, banco FROM cartoes_migracao_old
         """)
         execute("DROP TABLE cartoes_migracao_old")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[MIGRAÇÃO] Falha ao migrar 'cartoes': {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def _migrar_despesas_fixas_remover_unique_global():
@@ -605,6 +607,7 @@ def _migrar_despesas_fixas_remover_unique_global():
     if not _tabela_tem_unique_em_coluna("despesas_fixas", "descricao"):
         return
     try:
+        execute("DROP TABLE IF EXISTS despesas_fixas_migracao_old")
         execute("ALTER TABLE despesas_fixas RENAME TO despesas_fixas_migracao_old")
         execute("""
             CREATE TABLE despesas_fixas (
@@ -628,8 +631,8 @@ def _migrar_despesas_fixas_remover_unique_global():
             FROM despesas_fixas_migracao_old
         """)
         execute("DROP TABLE despesas_fixas_migracao_old")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[MIGRAÇÃO] Falha ao migrar 'despesas_fixas': {type(e).__name__}: {e}", file=sys.stderr)
 
 
 CATEGORIAS_PADRAO = ["Mercado", "Saúde/Remédios", "Estudos/Educação",
@@ -845,9 +848,31 @@ def _can_access_record(requesting_user, record_user_id) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _execute_autocura_unique(sql: str, params, tabela: str, funcao_migracao):
+    """
+    Executa um INSERT normalmente. Se falhar por causa de uma restrição
+    UNIQUE legada nessa tabela (de versões bem antigas do banco, anteriores
+    ao modelo multi-conta), roda a migração que remove essa restrição na
+    hora e tenta de novo uma única vez. Isso faz o app se autocorrigir mesmo
+    se, por qualquer motivo, a migração automática do init_db não tiver
+    surtido efeito antes (ex.: falha transitória de conexão em nuvem).
+    """
+    try:
+        execute(sql, params)
+    except Exception as e:
+        if "unique" in str(e).lower():
+            funcao_migracao()
+            execute(sql, params)
+        else:
+            raise
+
+
 def add_categoria(nome: str, teto_mensal: float = 0.0, user_id: int = None):
-    execute("INSERT INTO categorias (nome, teto_mensal, user_id) VALUES (?, ?, ?)",
-            (nome.strip(), teto_mensal, user_id))
+    _execute_autocura_unique(
+        "INSERT INTO categorias (nome, teto_mensal, user_id) VALUES (?, ?, ?)",
+        (nome.strip(), teto_mensal, user_id),
+        "categorias", _migrar_categorias_remover_unique_global,
+    )
 
 
 def list_categorias(requesting_user: dict = None):
@@ -902,8 +927,11 @@ def delete_categoria(categoria_id: int, requesting_user: dict):
 
 
 def add_cartao(nome: str, dia_fechamento: int, dia_vencimento: int, banco: str = None, user_id: int = None):
-    execute("INSERT INTO cartoes (nome, dia_fechamento, dia_vencimento, banco, user_id) VALUES (?, ?, ?, ?, ?)",
-            (nome.strip(), dia_fechamento, dia_vencimento, banco, user_id))
+    _execute_autocura_unique(
+        "INSERT INTO cartoes (nome, dia_fechamento, dia_vencimento, banco, user_id) VALUES (?, ?, ?, ?, ?)",
+        (nome.strip(), dia_fechamento, dia_vencimento, banco, user_id),
+        "cartoes", _migrar_cartoes_remover_unique_global,
+    )
 
 
 def list_cartoes(requesting_user: dict = None):
@@ -1193,11 +1221,15 @@ def delete_grupo(compra_grupo: str, requesting_user: dict):
 
 def add_despesa_fixa(descricao: str, categoria_id: int, valor: float, forma_pagamento: str,
                       cartao_id: int = None, dia_vencimento: int = 1, user_id: int = None):
-    execute("""
+    _execute_autocura_unique(
+        """
         INSERT INTO despesas_fixas
         (descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id)
         VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-    """, (descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, user_id))
+        """,
+        (descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, user_id),
+        "despesas_fixas", _migrar_despesas_fixas_remover_unique_global,
+    )
     row = fetch_one("SELECT * FROM despesas_fixas WHERE id = (SELECT last_insert_rowid())")
     log_action(user_id, "INSERT", "despesas_fixas", row.get("id") if row else None, None, row)
 
