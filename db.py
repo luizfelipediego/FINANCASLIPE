@@ -483,6 +483,7 @@ def init_db():
     # ---------------------------------------------------------------------
     _migrar_categorias_remover_unique_global()
     _migrar_cartoes_remover_unique_global()
+    _migrar_despesas_fixas_remover_unique_global()
 
     # ---------------------------------------------------------------------
     # SEPARAÇÃO TOTAL POR CONTA: cada usuário tem seu próprio conjunto de
@@ -589,6 +590,44 @@ def _migrar_cartoes_remover_unique_global():
             SELECT id, nome, dia_fechamento, dia_vencimento, user_id, banco FROM cartoes_migracao_old
         """)
         execute("DROP TABLE cartoes_migracao_old")
+    except Exception:
+        pass
+
+
+def _migrar_despesas_fixas_remover_unique_global():
+    """
+    Recria 'despesas_fixas' sem UNIQUE global em 'descricao', preservando os
+    dados. Mesma causa dos bugs anteriores em categorias/cartões: bancos
+    antigos tinham essa restrição globalmente, impedindo que duas contas
+    diferentes (ou até a mesma conta) tivessem duas despesas fixas com a
+    mesma descrição (ex.: 'Internet').
+    """
+    if not _tabela_tem_unique_em_coluna("despesas_fixas", "descricao"):
+        return
+    try:
+        execute("ALTER TABLE despesas_fixas RENAME TO despesas_fixas_migracao_old")
+        execute("""
+            CREATE TABLE despesas_fixas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                descricao TEXT NOT NULL,
+                categoria_id INTEGER,
+                valor REAL NOT NULL,
+                forma_pagamento TEXT NOT NULL,
+                cartao_id INTEGER,
+                dia_vencimento INTEGER DEFAULT 1,
+                ativa INTEGER DEFAULT 1,
+                user_id INTEGER DEFAULT NULL,
+                FOREIGN KEY (categoria_id) REFERENCES categorias(id),
+                FOREIGN KEY (cartao_id) REFERENCES cartoes(id)
+            )
+        """)
+        execute("""
+            INSERT INTO despesas_fixas
+            (id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id)
+            SELECT id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id
+            FROM despesas_fixas_migracao_old
+        """)
+        execute("DROP TABLE despesas_fixas_migracao_old")
     except Exception:
         pass
 
