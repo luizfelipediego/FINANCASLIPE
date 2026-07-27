@@ -544,41 +544,103 @@ def _tabela_tem_unique_em_coluna(tabela: str, coluna: str) -> bool:
     return False
 
 
+def _tabela_existe(nome: str) -> bool:
+    try:
+        row = fetch_one("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (nome,))
+        return row is not None
+    except Exception:
+        return False
+
+
+def _migrar_tabela_remover_unique(tabela: str, coluna: str, create_sql_template: str, colunas: list):
+    """
+    Remove uma restrição UNIQUE legada de 'tabela' na coluna informada,
+    preservando os dados. 'create_sql_template' deve ter '{nome}' no lugar
+    do nome da tabela (ex.: "CREATE TABLE IF NOT EXISTS {nome} (...)").
+
+    Cuidados tomados, por causa de bugs já vistos em produção com o banco em
+    nuvem (Turso):
+    - Tudo roda dentro de UMA ÚNICA conexão/transação (BEGIN...COMMIT, com
+      ROLLBACK se algo falhar no meio) — evita deixar o banco num estado
+      parcial se a rede cair no meio do processo.
+    - NUNCA renomeamos a tabela original diretamente. Se renomeássemos
+      'cartoes' para 'cartoes_migracao_old', o SQLite reescreve sozinho as
+      FOREIGN KEYs de outras tabelas (ex.: despesas.cartao_id) para apontar
+      para esse nome temporário — e se esse nome temporário for apagado
+      depois (ou a criação da tabela nova falhar no meio do caminho), essas
+      referências ficam "penduradas" apontando para uma tabela que não
+      existe mais. Em vez disso: criamos a tabela nova já correta, copiamos
+      os dados, apagamos a antiga e só então renomeamos a nova para o nome
+      definitivo — que nunca teve nada apontando para ela, então é seguro.
+    - Antes de qualquer coisa, SEMPRE tenta reconciliar tabelas residuais de
+      tentativas anteriores (nomes '<tabela>_migracao_old' ou
+      '<tabela>__nova_sem_unique'), devolvendo os dados presos nelas para a
+      tabela principal, mesmo que a tabela principal já exista (ela pode já
+      ter sido recriada vazia por um 'CREATE TABLE IF NOT EXISTS' anterior
+      nesta mesma inicialização — por isso não dá para confiar apenas em
+      "a tabela principal existe?" como sinal de que está tudo certo).
+    """
+    tabela_nova = f"{tabela}__nova_sem_unique"
+    tabela_legado_old = f"{tabela}_migracao_old"  # nome usado por uma versão anterior desta migração
+    colunas_str = ", ".join(colunas)
+    residuos = [t for t in (tabela_legado_old, tabela_nova) if _tabela_existe(t)]
+
+    tem_unique = _tabela_tem_unique_em_coluna(tabela, coluna)
+
+    if not tem_unique and not residuos:
+        return  # já está tudo certo, nada a fazer
+
+    conn = _nova_conexao()
+    try:
+        conn.execute("BEGIN")
+
+        # 1) Reconcilia qualquer resíduo de tentativas anteriores, resgatando
+        #    linhas que porventura não estejam na tabela principal.
+        for residuo in residuos:
+            conn.execute(f"INSERT OR IGNORE INTO {tabela} ({colunas_str}) SELECT {colunas_str} FROM {residuo}")
+            conn.execute(f"DROP TABLE {residuo}")
+
+        # 2) Se a restrição UNIQUE ainda estiver presente, recria a tabela sem ela.
+        if _tabela_tem_unique_em_coluna(tabela, coluna):
+            conn.execute(f"DROP TABLE IF EXISTS {tabela_nova}")
+            conn.execute(create_sql_template.format(nome=tabela_nova))
+            conn.execute(f"INSERT INTO {tabela_nova} ({colunas_str}) SELECT {colunas_str} FROM {tabela}")
+            conn.execute(f"DROP TABLE {tabela}")
+            conn.execute(f"ALTER TABLE {tabela_nova} RENAME TO {tabela}")
+
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[MIGRAÇÃO] Falha ao migrar '{tabela}': {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
+        conn.close()
+
+
 def _migrar_categorias_remover_unique_global():
     """Recria 'categorias' sem UNIQUE global em 'nome', preservando os dados."""
-    if not _tabela_tem_unique_em_coluna("categorias", "nome"):
-        return
-    try:
-        execute("DROP TABLE IF EXISTS categorias_migracao_old")
-        execute("ALTER TABLE categorias RENAME TO categorias_migracao_old")
-        execute("""
-            CREATE TABLE categorias (
+    _migrar_tabela_remover_unique(
+        "categorias", "nome",
+        """
+            CREATE TABLE IF NOT EXISTS {nome} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nome TEXT NOT NULL,
                 teto_mensal REAL DEFAULT 0,
                 user_id INTEGER DEFAULT NULL
             )
-        """)
-        execute("""
-            INSERT INTO categorias (id, nome, teto_mensal, user_id)
-            SELECT id, nome, teto_mensal, user_id FROM categorias_migracao_old
-        """)
-        execute("DROP TABLE categorias_migracao_old")
-    except Exception as e:
-        # Não derruba o app por uma falha na migração; registra nos logs do
-        # servidor para diagnóstico e será tentada de novo na próxima vez.
-        print(f"[MIGRAÇÃO] Falha ao migrar 'categorias': {type(e).__name__}: {e}", file=sys.stderr)
+        """,
+        ["id", "nome", "teto_mensal", "user_id"],
+    )
 
 
 def _migrar_cartoes_remover_unique_global():
     """Recria 'cartoes' sem UNIQUE global em 'nome', preservando os dados."""
-    if not _tabela_tem_unique_em_coluna("cartoes", "nome"):
-        return
-    try:
-        execute("DROP TABLE IF EXISTS cartoes_migracao_old")
-        execute("ALTER TABLE cartoes RENAME TO cartoes_migracao_old")
-        execute("""
-            CREATE TABLE cartoes (
+    _migrar_tabela_remover_unique(
+        "cartoes", "nome",
+        """
+            CREATE TABLE IF NOT EXISTS {nome} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nome TEXT NOT NULL,
                 dia_fechamento INTEGER NOT NULL,
@@ -586,14 +648,9 @@ def _migrar_cartoes_remover_unique_global():
                 user_id INTEGER DEFAULT NULL,
                 banco TEXT DEFAULT NULL
             )
-        """)
-        execute("""
-            INSERT INTO cartoes (id, nome, dia_fechamento, dia_vencimento, user_id, banco)
-            SELECT id, nome, dia_fechamento, dia_vencimento, user_id, banco FROM cartoes_migracao_old
-        """)
-        execute("DROP TABLE cartoes_migracao_old")
-    except Exception as e:
-        print(f"[MIGRAÇÃO] Falha ao migrar 'cartoes': {type(e).__name__}: {e}", file=sys.stderr)
+        """,
+        ["id", "nome", "dia_fechamento", "dia_vencimento", "user_id", "banco"],
+    )
 
 
 def _migrar_despesas_fixas_remover_unique_global():
@@ -604,13 +661,10 @@ def _migrar_despesas_fixas_remover_unique_global():
     diferentes (ou até a mesma conta) tivessem duas despesas fixas com a
     mesma descrição (ex.: 'Internet').
     """
-    if not _tabela_tem_unique_em_coluna("despesas_fixas", "descricao"):
-        return
-    try:
-        execute("DROP TABLE IF EXISTS despesas_fixas_migracao_old")
-        execute("ALTER TABLE despesas_fixas RENAME TO despesas_fixas_migracao_old")
-        execute("""
-            CREATE TABLE despesas_fixas (
+    _migrar_tabela_remover_unique(
+        "despesas_fixas", "descricao",
+        """
+            CREATE TABLE IF NOT EXISTS {nome} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 descricao TEXT NOT NULL,
                 categoria_id INTEGER,
@@ -623,16 +677,10 @@ def _migrar_despesas_fixas_remover_unique_global():
                 FOREIGN KEY (categoria_id) REFERENCES categorias(id),
                 FOREIGN KEY (cartao_id) REFERENCES cartoes(id)
             )
-        """)
-        execute("""
-            INSERT INTO despesas_fixas
-            (id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id)
-            SELECT id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id
-            FROM despesas_fixas_migracao_old
-        """)
-        execute("DROP TABLE despesas_fixas_migracao_old")
-    except Exception as e:
-        print(f"[MIGRAÇÃO] Falha ao migrar 'despesas_fixas': {type(e).__name__}: {e}", file=sys.stderr)
+        """,
+        ["id", "descricao", "categoria_id", "valor", "forma_pagamento", "cartao_id",
+         "dia_vencimento", "ativa", "user_id"],
+    )
 
 
 CATEGORIAS_PADRAO = ["Mercado", "Saúde/Remédios", "Estudos/Educação",
