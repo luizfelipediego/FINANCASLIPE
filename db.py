@@ -834,10 +834,25 @@ def update_categoria_teto(categoria_id: int, teto_mensal: float, requesting_user
     log_action(requesting_user.get("id"), "UPDATE", "categorias", categoria_id, before, after)
 
 
+class RegistroVinculadoError(Exception):
+    """Levantada quando se tenta excluir um registro que outras tabelas ainda referenciam."""
+    pass
+
+
 def delete_categoria(categoria_id: int, requesting_user: dict):
     before = fetch_one("SELECT * FROM categorias WHERE id = ?", (categoria_id,))
     if not before or not _can_access_record(requesting_user, before.get("user_id")):
         raise PermissionError("Sem permissão para excluir esta categoria.")
+
+    n_despesas = fetch_one("SELECT COUNT(*) AS n FROM despesas WHERE categoria_id = ?", (categoria_id,))["n"]
+    n_fixas = fetch_one("SELECT COUNT(*) AS n FROM despesas_fixas WHERE categoria_id = ?", (categoria_id,))["n"]
+    if n_despesas or n_fixas:
+        raise RegistroVinculadoError(
+            f"Não é possível excluir '{before['nome']}': existem {n_despesas} despesa(s) e "
+            f"{n_fixas} despesa(s) fixa(s) usando essa categoria. Exclua ou mude a categoria "
+            "delas primeiro."
+        )
+
     execute("DELETE FROM categorias WHERE id = ?", (categoria_id,))
     log_action(requesting_user.get("id"), "DELETE", "categorias", categoria_id, before, None)
 
@@ -864,6 +879,16 @@ def delete_cartao(cartao_id: int, requesting_user: dict):
     before = fetch_one("SELECT * FROM cartoes WHERE id = ?", (cartao_id,))
     if not before or not _can_access_record(requesting_user, before.get("user_id")):
         raise PermissionError("Sem permissão para excluir este cartão.")
+
+    n_despesas = fetch_one("SELECT COUNT(*) AS n FROM despesas WHERE cartao_id = ?", (cartao_id,))["n"]
+    n_fixas = fetch_one("SELECT COUNT(*) AS n FROM despesas_fixas WHERE cartao_id = ?", (cartao_id,))["n"]
+    if n_despesas or n_fixas:
+        raise RegistroVinculadoError(
+            f"Não é possível excluir '{before['nome']}': existem {n_despesas} despesa(s) e "
+            f"{n_fixas} despesa(s) fixa(s) lançadas nesse cartão. Exclua essas despesas "
+            "primeiro (na aba '📝 Lançar Despesa' ou '🔁 Despesas Fixas')."
+        )
+
     execute("DELETE FROM cartoes WHERE id = ?", (cartao_id,))
     log_action(requesting_user.get("id"), "DELETE", "cartoes", cartao_id, before, None)
 
@@ -1000,30 +1025,44 @@ def list_despesas(requesting_user: dict = None, ano: int = None, mes: int = None
     return fetch_all(sql, params)
 
 
-def list_parcelamentos(requesting_user: dict = None, referencia: date = None):
+def list_compras_por_tipo(requesting_user: dict = None, forma_pagamento: str = None,
+                           somente_parceladas: bool = None, referencia: date = None):
     """
-    Resume todas as compras parceladas no cartão de crédito (parcela_total > 1)
-    do usuário, mostrando quanto já foi pago e quanto falta para quitar cada
-    uma, com base numa data de referência (por padrão, hoje).
+    Agrupa as despesas por compra_grupo e calcula o andamento de cada uma
+    (parcelas pagas/restantes, valores), com base numa data de referência
+    (por padrão, hoje). Usado para montar as abas de acompanhamento:
+    'À Vista no Cartão' (somente_parceladas=False), 'Parcelado no Cartão'
+    (somente_parceladas=True) e 'Financiamentos' (forma_pagamento="Financiamento").
 
-    Cada compra parcelada já tem TODAS as parcelas futuras gravadas em
-    'despesas' desde o momento da compra (feito em add_despesa) — não é
-    preciso "gerar" nada mês a mês, como acontece com despesas fixas. Aqui só
-    agrupamos essas parcelas por 'compra_grupo' e calculamos o andamento.
+    Cada compra já tem TODAS as parcelas futuras gravadas em 'despesas' desde
+    o momento da compra (feito em add_despesa) — não é preciso "gerar" nada
+    mês a mês, como acontece com despesas fixas. Aqui só agrupamos essas
+    parcelas por 'compra_grupo' e calculamos o andamento.
+
+    - forma_pagamento: filtra por uma forma de pagamento específica (ex.:
+      "Cartão de Crédito", "Financiamento"). Se None, considera todas.
+    - somente_parceladas: True = só compras com parcela_total > 1;
+      False = só compras com parcela_total == 1 (à vista); None = ambas.
     """
     if not requesting_user:
         return []
     referencia = referencia or date.today()
     ref_competencia = date(referencia.year, referencia.month, 1)
 
-    linhas = fetch_all("""
+    sql = """
         SELECT d.*, c.nome AS categoria_nome, ca.nome AS cartao_nome
         FROM despesas d
         LEFT JOIN categorias c ON d.categoria_id = c.id
         LEFT JOIN cartoes ca ON d.cartao_id = ca.id
-        WHERE d.user_id = ? AND d.parcela_total > 1
-        ORDER BY d.compra_grupo, d.parcela_atual
-    """, (requesting_user.get("id"),))
+        WHERE d.user_id = ?
+    """
+    params = [requesting_user.get("id")]
+    if forma_pagamento:
+        sql += " AND d.forma_pagamento = ?"
+        params.append(forma_pagamento)
+    sql += " ORDER BY d.compra_grupo, d.parcela_atual"
+
+    linhas = fetch_all(sql, params)
 
     grupos = {}
     for row in linhas:
@@ -1034,6 +1073,11 @@ def list_parcelamentos(requesting_user: dict = None, referencia: date = None):
         rows_ordenadas = sorted(rows, key=lambda r: r["parcela_atual"])
         primeira = rows_ordenadas[0]
         parcela_total = primeira["parcela_total"]
+
+        if somente_parceladas is True and parcela_total <= 1:
+            continue
+        if somente_parceladas is False and parcela_total > 1:
+            continue
 
         valor_pago = 0.0
         valor_restante = 0.0
@@ -1057,6 +1101,7 @@ def list_parcelamentos(requesting_user: dict = None, referencia: date = None):
             "descricao": primeira["descricao"],
             "categoria_nome": primeira["categoria_nome"],
             "cartao_nome": primeira["cartao_nome"],
+            "forma_pagamento": primeira["forma_pagamento"],
             "data_compra": primeira["data_compra"],
             "valor_total": valor_total,
             "valor_parcela": valor_parcela,
@@ -1071,6 +1116,17 @@ def list_parcelamentos(requesting_user: dict = None, referencia: date = None):
     # Compras em andamento primeiro (mais parcelas restantes primeiro), concluídas por último
     resultado.sort(key=lambda x: (x["concluido"], -x["parcelas_restantes"]))
     return resultado
+
+
+def list_parcelamentos(requesting_user: dict = None, referencia: date = None):
+    """
+    Atalho: compras PARCELADAS no cartão de crédito (mantido para a seção
+    '🧾 Parcelamentos em Andamento' da página Cartões). Financiamentos têm
+    sua própria aba/consulta (ver list_compras_por_tipo com
+    forma_pagamento='Financiamento').
+    """
+    return list_compras_por_tipo(requesting_user, forma_pagamento="Cartão de Crédito",
+                                  somente_parceladas=True, referencia=referencia)
 
 
 def delete_despesa(despesa_id: int, requesting_user: dict):
@@ -1130,9 +1186,16 @@ def set_despesa_fixa_ativa(fixa_id: int, ativa: bool, requesting_user: dict):
 
 
 def delete_despesa_fixa(fixa_id: int, requesting_user: dict):
+    """
+    Exclui o CADASTRO da despesa fixa (o "molde" que gera lançamentos todo
+    mês). As despesas que ela já gerou em meses anteriores são mantidas no
+    histórico — só perdem o vínculo com esse cadastro (fixa_origem_id passa a
+    NULL) — para não apagar despesas que já aconteceram de verdade.
+    """
     before = fetch_one("SELECT * FROM despesas_fixas WHERE id = ?", (fixa_id,))
     if not before or not _can_access_record(requesting_user, before.get("user_id")):
         raise PermissionError("Sem permissão para excluir esta despesa fixa.")
+    execute("UPDATE despesas SET fixa_origem_id = NULL WHERE fixa_origem_id = ?", (fixa_id,))
     execute("DELETE FROM despesas_fixas WHERE id = ?", (fixa_id,))
     log_action(requesting_user.get("id"), "DELETE", "despesas_fixas", fixa_id, before, None)
 
