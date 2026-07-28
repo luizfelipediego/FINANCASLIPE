@@ -583,6 +583,19 @@ def add_despesa(data_compra: date, categoria_id: int, descricao: str, valor_tota
             valor_i, forma_pagamento, cartao_id, i + 1, parcelas, grupo, user_id
         ))
 
+def edit_despesa(despesa_id: int, data_compra: str, data_competencia: str, categoria_id: int, descricao: str, valor: float, forma_pagamento: str, cartao_id: int, requesting_user: dict):
+    """Permite a edição manual de todos os campos de uma parcela."""
+    before = fetch_one("SELECT * FROM despesas WHERE id = ?", (despesa_id,))
+    if not before or not _can_access_record(requesting_user, before.get("user_id")):
+        raise PermissionError("Sem permissão para editar esta despesa.")
+    execute("""
+        UPDATE despesas 
+        SET data_compra = ?, data_competencia = ?, categoria_id = ?, descricao = ?, valor = ?, forma_pagamento = ?, cartao_id = ? 
+        WHERE id = ?
+    """, (data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, despesa_id))
+    after = fetch_one("SELECT * FROM despesas WHERE id = ?", (despesa_id,))
+    log_action(requesting_user.get("id"), "UPDATE", "despesas", despesa_id, before, after)
+
 def list_despesas(requesting_user: dict = None, ano: int = None, mes: int = None):
     if not requesting_user: return []
     sql = """
