@@ -763,6 +763,11 @@ elif pagina == "⚙️ Configurações":
                     "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
                 )
                 st.write("**Tabelas existentes:**", [t["name"] for t in tabelas])
+
+                migracoes = db.fetch_all("SELECT nome, executado_em FROM migracoes_executadas ORDER BY nome")
+                st.write("**Migrações já marcadas como concluídas:**",
+                         {m["nome"]: m["executado_em"] for m in migracoes} or "nenhuma ainda")
+
                 for tabela, coluna in (("categorias", "nome"), ("cartoes", "nome"),
                                         ("despesas_fixas", "descricao")):
                     tem_unique = db._tabela_tem_unique_em_coluna(tabela, coluna)
@@ -781,11 +786,19 @@ elif pagina == "⚙️ Configurações":
             except Exception as e:
                 st.error(f"Erro ao verificar: {e}")
 
+        st.caption(
+            "O botão abaixo força a correção AGORA, ignorando o controle de "
+            "'já executado' — use se o diagnóstico acima mostrar algo em vermelho."
+        )
         if st.button("🛠️ Forçar correção agora"):
             try:
                 db._migrar_categorias_remover_unique_global()
                 db._migrar_cartoes_remover_unique_global()
                 db._migrar_despesas_fixas_remover_unique_global()
+                db.execute(
+                    "INSERT OR IGNORE INTO migracoes_executadas (nome) VALUES (?), (?), (?)",
+                    ("remover_unique_categorias", "remover_unique_cartoes", "remover_unique_despesas_fixas"),
+                )
                 st.success("Correção executada. Clique em 'Verificar agora' para conferir o resultado.")
             except Exception as e:
                 st.error(f"Erro ao corrigir: {e}")
