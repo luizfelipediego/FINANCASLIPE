@@ -751,6 +751,45 @@ elif pagina == "⚙️ Configurações":
         except Exception as e:
             st.error("Erro ao criar backup: " + str(e))
 
+    with st.expander("🔧 Diagnóstico e reparo do banco de dados"):
+        st.caption(
+            "Mostra o estado real das tabelas mais sensíveis (categorias, cartões e "
+            "despesas fixas) e permite forçar a correção na hora, sem precisar de um "
+            "novo deploy."
+        )
+        if st.button("🔍 Verificar agora"):
+            try:
+                tabelas = db.fetch_all(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                )
+                st.write("**Tabelas existentes:**", [t["name"] for t in tabelas])
+                for tabela, coluna in (("categorias", "nome"), ("cartoes", "nome"),
+                                        ("despesas_fixas", "descricao")):
+                    tem_unique = db._tabela_tem_unique_em_coluna(tabela, coluna)
+                    total = db.fetch_one(f"SELECT COUNT(*) AS n FROM {tabela}")["n"]
+                    residuos = [
+                        nome for nome in (f"{tabela}_migracao_old", f"{tabela}__nova_sem_unique")
+                        if db._tabela_existe(nome)
+                    ]
+                    if tem_unique or residuos:
+                        st.error(
+                            f"⚠️ **{tabela}.{coluna}**: {total} linha(s). "
+                            f"UNIQUE ainda presente: {tem_unique}. Resíduos: {residuos or 'nenhum'}."
+                        )
+                    else:
+                        st.success(f"✅ **{tabela}.{coluna}**: {total} linha(s). Sem UNIQUE, sem resíduos.")
+            except Exception as e:
+                st.error(f"Erro ao verificar: {e}")
+
+        if st.button("🛠️ Forçar correção agora"):
+            try:
+                db._migrar_categorias_remover_unique_global()
+                db._migrar_cartoes_remover_unique_global()
+                db._migrar_despesas_fixas_remover_unique_global()
+                st.success("Correção executada. Clique em 'Verificar agora' para conferir o resultado.")
+            except Exception as e:
+                st.error(f"Erro ao corrigir: {e}")
+
     st.markdown("---")
     st.subheader("ℹ️ Sobre o sistema")
     st.write(
