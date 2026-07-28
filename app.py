@@ -787,14 +787,17 @@ elif pagina == "⚙️ Configurações":
                 st.error(f"Erro ao verificar: {e}")
 
         st.caption(
-            "O botão abaixo força a correção AGORA, ignorando o controle de "
-            "'já executado' — use se o diagnóstico acima mostrar algo em vermelho."
+            "O botão abaixo força a correção AGORA (inclusive tentando recuperar "
+            "dados presos em tabelas residuais de tentativas antigas), ignorando o "
+            "controle de 'já executado' — use se o diagnóstico acima mostrar algo em "
+            "vermelho. Clique uma vez e confira o resultado em 'Verificar agora' antes "
+            "de clicar de novo, para não duplicar nenhum registro recuperado."
         )
         if st.button("🛠️ Forçar correção agora"):
             try:
-                db._migrar_categorias_remover_unique_global()
-                db._migrar_cartoes_remover_unique_global()
-                db._migrar_despesas_fixas_remover_unique_global()
+                db._migrar_categorias_remover_unique_global(reconciliar_residuos=True)
+                db._migrar_cartoes_remover_unique_global(reconciliar_residuos=True)
+                db._migrar_despesas_fixas_remover_unique_global(reconciliar_residuos=True)
                 db.execute(
                     "INSERT OR IGNORE INTO migracoes_executadas (nome) VALUES (?), (?), (?)",
                     ("remover_unique_categorias", "remover_unique_cartoes", "remover_unique_despesas_fixas"),
