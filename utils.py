@@ -1,5 +1,3 @@
-### 📄 3. `utils.py`
-```python
 # -*- coding: utf-8 -*-
 """
 utils.py
@@ -7,8 +5,17 @@ utils.py
 Funções auxiliares: formatação de moeda, nomes de meses em português,
 dicionário de bancos (com selo colorido/emoji) e cálculo do resumo (balanço)
 financeiro de um mês específico.
+
+OBS. SOBRE OS "SÍMBOLOS DOS BANCOS":
+As logomarcas oficiais de Itaú, Bradesco, Santander, Nubank etc. são marcas
+registradas de cada instituição, protegidas por direito de propriedade
+intelectual — não é possível reproduzir os logos reais aqui. Em vez disso,
+foi criado um selo estilizado (emoji colorido + sigla/nome do banco) só para
+facilitar a identificação visual dos cartões cadastrados, sem usar nenhuma
+marca oficial.
 """
 import pandas as pd
+
 import db
 
 MESES_PT = {
@@ -16,6 +23,11 @@ MESES_PT = {
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
 }
 
+# ---------------------------------------------------------------------------
+# Selos estilizados por banco (emoji + nome) — NÃO são as logomarcas oficiais,
+# apenas um selo colorido para diferenciar visualmente cada instituição.
+# 12 bancos/fintechs mais comuns no Brasil.
+# ---------------------------------------------------------------------------
 BANCOS_EMOJI = {
     "Itaú":               "🟠 Itaú",
     "Bradesco":           "🔴 Bradesco",
@@ -37,7 +49,7 @@ BANCOS_EMOJI = {
 def formatar_moeda(valor: float) -> str:
     """Formata um número no padrão monetário brasileiro: R$ 1.234,56"""
     if valor is None:
-        valor = 0.0
+        valor = 0
     texto = f"{valor:,.2f}"
     texto = texto.replace(",", "TEMP").replace(".", ",").replace("TEMP", ".")
     return f"R$ {texto}"
