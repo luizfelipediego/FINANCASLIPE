@@ -606,33 +606,43 @@ def _reconciliar_residuos_de_tentativas_antigas(tabela: str, colunas: list):
     principal sumia ou ficava incompleta — foi exatamente isso que causou o
     erro "no such table: cartoes_migracao_old".
 
-    Esta função limpa esse estado, devolvendo qualquer dado que tenha ficado
-    preso num desses nomes temporários para a tabela principal. Depois
-    disso, a remoção do UNIQUE em si passa a ser feita de um jeito
-    fundamentalmente mais seguro (ver _remover_unique_sem_recriar_tabela),
-    que nunca mais cria esse tipo de tabela temporária.
+    Esta função devolve qualquer dado que tenha ficado preso num desses
+    nomes temporários para a tabela principal. O resgate dos dados é o
+    passo CRÍTICO (feito em sua própria operação). Apagar a tabela residual
+    depois é só limpeza — NÃO crítico — e é tentado separadamente: se falhar
+    por qualquer motivo (inclusive uma instabilidade momentânea do banco em
+    nuvem), o erro é apenas registrado e ignorado, e a tabela residual órfã
+    fica lá sem atrapalhar nada. Isso evita que uma falha ao apagar essa
+    tabela (que já causou o mesmo erro se repetir várias vezes) impeça a
+    migração de ser considerada concluída.
     """
-    colunas_str = ", ".join(colunas)
+    colunas_sem_id = [c for c in colunas if c != "id"]
+    colunas_str = ", ".join(colunas_sem_id)
     for nome_residuo in (f"{tabela}_migracao_old", f"{tabela}__nova_sem_unique"):
         if not _tabela_existe(nome_residuo):
             continue
-        conn = _nova_conexao()
+
+        # Passo crítico: resgatar os dados presos no resíduo. Propositalmente
+        # NÃO reaproveita o 'id' original — se novos registros já tiverem
+        # sido cadastrados na tabela principal enquanto o resíduo ficou
+        # esquecido, o autoincremento pode ter reiniciado e colidir com os
+        # ids antigos, fazendo o INSERT OR IGNORE descartar silenciosamente
+        # os dados que estamos tentando resgatar. Deixando o SQLite atribuir
+        # ids novos, nada se perde (o conteúdo é o que importa, não o
+        # número interno do id).
         try:
-            conn.execute("BEGIN")
-            conn.execute(
-                f"INSERT OR IGNORE INTO {tabela} ({colunas_str}) SELECT {colunas_str} FROM {nome_residuo}"
-            )
-            conn.execute(f"DROP TABLE IF EXISTS {nome_residuo}")
-            conn.commit()
+            execute(f"INSERT INTO {tabela} ({colunas_str}) SELECT {colunas_str} FROM {nome_residuo}")
         except Exception as e:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            print(f"[MIGRAÇÃO] Falha ao reconciliar resíduo '{nome_residuo}': "
+            print(f"[MIGRAÇÃO] Falha ao resgatar dados de '{nome_residuo}' (não crítico se a "
+                  f"tabela principal já tiver os dados): {type(e).__name__}: {e}", file=sys.stderr)
+
+        # Passo de limpeza (opcional): apagar o resíduo. Se falhar, não tem problema.
+        try:
+            execute(f"DROP TABLE IF EXISTS {nome_residuo}")
+        except Exception as e:
+            print(f"[MIGRAÇÃO] Não foi possível apagar o resíduo '{nome_residuo}' agora "
+                  f"(sem problema, os dados já foram resgatados; será tentado de novo depois): "
                   f"{type(e).__name__}: {e}", file=sys.stderr)
-        finally:
-            conn.close()
 
 
 def _remover_unique_sem_recriar_tabela(tabela: str, coluna: str) -> bool:
@@ -688,33 +698,44 @@ def _remover_unique_sem_recriar_tabela(tabela: str, coluna: str) -> bool:
     return not _tabela_tem_unique_em_coluna(tabela, coluna)
 
 
-def _migrar_categorias_remover_unique_global():
+def _migrar_categorias_remover_unique_global(reconciliar_residuos: bool = False):
     """Remove o UNIQUE legado de 'categorias.nome', preservando os dados."""
-    _reconciliar_residuos_de_tentativas_antigas("categorias", ["id", "nome", "teto_mensal", "user_id"])
+    if reconciliar_residuos:
+        _reconciliar_residuos_de_tentativas_antigas("categorias", ["id", "nome", "teto_mensal", "user_id"])
     _remover_unique_sem_recriar_tabela("categorias", "nome")
 
 
-def _migrar_cartoes_remover_unique_global():
+def _migrar_cartoes_remover_unique_global(reconciliar_residuos: bool = False):
     """Remove o UNIQUE legado de 'cartoes.nome', preservando os dados."""
-    _reconciliar_residuos_de_tentativas_antigas(
-        "cartoes", ["id", "nome", "dia_fechamento", "dia_vencimento", "user_id", "banco"]
-    )
+    if reconciliar_residuos:
+        _reconciliar_residuos_de_tentativas_antigas(
+            "cartoes", ["id", "nome", "dia_fechamento", "dia_vencimento", "user_id", "banco"]
+        )
     _remover_unique_sem_recriar_tabela("cartoes", "nome")
 
 
-def _migrar_despesas_fixas_remover_unique_global():
+def _migrar_despesas_fixas_remover_unique_global(reconciliar_residuos: bool = False):
     """
     Remove o UNIQUE legado de 'despesas_fixas.descricao', preservando os
     dados. Mesma causa dos bugs anteriores em categorias/cartões: bancos
     antigos tinham essa restrição globalmente, impedindo que duas contas
     diferentes (ou até a mesma conta) tivessem duas despesas fixas com a
     mesma descrição (ex.: 'Internet').
+
+    IMPORTANTE: por padrão (reconciliar_residuos=False), a inicialização
+    automática NÃO toca em nenhuma tabela residual de tentativas antigas
+    ('<tabela>_migracao_old' etc.) — só remove o UNIQUE da tabela principal,
+    que é uma operação isolada e muito mais segura. A reconciliação desses
+    resíduos (recuperar dados presos neles) só acontece quando pedida
+    explicitamente pelo painel de diagnóstico em Configurações, porque foi
+    justamente essa etapa que causou os erros repetidos em produção.
     """
-    _reconciliar_residuos_de_tentativas_antigas(
-        "despesas_fixas",
-        ["id", "descricao", "categoria_id", "valor", "forma_pagamento", "cartao_id",
-         "dia_vencimento", "ativa", "user_id"],
-    )
+    if reconciliar_residuos:
+        _reconciliar_residuos_de_tentativas_antigas(
+            "despesas_fixas",
+            ["id", "descricao", "categoria_id", "valor", "forma_pagamento", "cartao_id",
+             "dia_vencimento", "ativa", "user_id"],
+        )
     _remover_unique_sem_recriar_tabela("despesas_fixas", "descricao")
 
 
