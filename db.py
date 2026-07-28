@@ -329,8 +329,39 @@ def _garantir_coluna(tabela: str, coluna: str, definicao_sql: str):
             pass
 
 
+def _corrigir_chaves_estrangeiras_residuais():
+    """
+    Corrige silenciosamente as chaves estrangeiras de tabelas filhas (como despesas_fixas) 
+    que ficaram apontando para tabelas temporárias (ex: cartoes_migracao_old) 
+    após migrações interrompidas em versões antigas.
+    """
+    conn = _nova_conexao()
+    try:
+        conn.execute("PRAGMA writable_schema = ON")
+        conn.execute("""
+            UPDATE sqlite_master 
+            SET sql = REPLACE(REPLACE(sql, '_migracao_old', ''), '__nova_sem_unique', '') 
+            WHERE type = 'table' AND (sql LIKE '%_migracao_old%' OR sql LIKE '%__nova_sem_unique%')
+        """)
+        conn.execute("PRAGMA writable_schema = OFF")
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.execute("PRAGMA writable_schema = OFF")
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[MIGRAÇÃO] Falha ao corrigir FKs residuais: {e}", file=sys.stderr)
+    finally:
+        conn.close()
+
+
 def init_db():
     """Cria todas as tabelas do sistema, caso ainda não existam (cada instrução isolada)."""
+    
+    # 1. Executa a correção preventiva de FKs fantasmas
+    _corrigir_chaves_estrangeiras_residuais()
+
     execute("""
     CREATE TABLE IF NOT EXISTS categorias (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
