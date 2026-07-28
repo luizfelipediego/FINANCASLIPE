@@ -47,7 +47,7 @@ def _inicializar_banco_uma_vez():
 _inicializar_banco_uma_vez()
 
 FORMAS_PAGAMENTO = ["PIX", "Cartão de Crédito", "Cartão de Débito", "Dinheiro", "Transferência", "Financiamento"]
-ORIGENS_RECEITA = ["Trabalho principal", "Renda Extra", "Rendimentos", "Outros"]
+ORIGENS_RECEITA = ["Salário (Prefeitura de Maricá)", "Receitas (Paiva Projetos e Consultoria)", "Rendimentos (FIIs e Renda Fixa)", "Outros"]
 
 HOJE = date.today()
 
