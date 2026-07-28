@@ -407,6 +407,18 @@ def init_db():
     """)
     execute("INSERT OR IGNORE INTO config (id, reserva_percentual) VALUES (1, 10)")
 
+    # Controle de migrações já executadas: garante que cada correção de
+    # esquema rode NO MÁXIMO UMA VEZ para sempre, mesmo que o processo do
+    # servidor reinicie várias vezes (a cada deploy, a cada "acordar" do
+    # app etc.). Tentar repetir uma migração de DDL toda vez que o processo
+    # sobe é o que causava corrida/erro contra o banco em nuvem.
+    execute("""
+    CREATE TABLE IF NOT EXISTS migracoes_executadas (
+        nome TEXT PRIMARY KEY,
+        executado_em TEXT DEFAULT (datetime('now'))
+    )
+    """)
+
     # Tabela de usuários
     execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -474,16 +486,21 @@ def init_db():
 
     # ---------------------------------------------------------------------
     # MIGRAÇÃO CRÍTICA: bancos criados em versões antigas do app tinham uma
-    # restrição UNIQUE global em categorias.nome / cartoes.nome (por isso o
-    # código antigo tratava "já existe uma categoria/cartão com esse nome"
-    # como se fosse normal). Isso impede que DUAS CONTAS DIFERENTES tenham
-    # uma categoria ou cartão com o mesmo nome (ex.: 'Mercado'), quebrando a
-    # separação total entre contas. As funções abaixo detectam essa
-    # restrição legada e recriam as tabelas sem ela, preservando os dados.
+    # restrição UNIQUE global em categorias.nome / cartoes.nome / despesas_
+    # fixas.descricao (por isso o código antigo tratava "já existe uma
+    # categoria/cartão com esse nome" como se fosse normal). Isso impede que
+    # DUAS CONTAS DIFERENTES tenham um registro com o mesmo nome (ex.:
+    # 'Mercado'), quebrando a separação total entre contas.
+    #
+    # Cada uma dessas correções roda NO MÁXIMO UMA VEZ para sempre (ver
+    # _executar_migracao_uma_vez) — repetir uma operação de DDL toda vez que
+    # o processo do servidor reinicia é o que causava corrida/erro contra o
+    # banco em nuvem (ex.: tentar apagar uma tabela temporária que uma
+    # execução anterior, de um processo diferente, já tinha apagado).
     # ---------------------------------------------------------------------
-    _migrar_categorias_remover_unique_global()
-    _migrar_cartoes_remover_unique_global()
-    _migrar_despesas_fixas_remover_unique_global()
+    _executar_migracao_uma_vez("remover_unique_categorias", _migrar_categorias_remover_unique_global)
+    _executar_migracao_uma_vez("remover_unique_cartoes", _migrar_cartoes_remover_unique_global)
+    _executar_migracao_uma_vez("remover_unique_despesas_fixas", _migrar_despesas_fixas_remover_unique_global)
 
     # ---------------------------------------------------------------------
     # SEPARAÇÃO TOTAL POR CONTA: cada usuário tem seu próprio conjunto de
@@ -552,6 +569,33 @@ def _tabela_existe(nome: str) -> bool:
         return False
 
 
+def _executar_migracao_uma_vez(nome: str, funcao):
+    """
+    Roda 'funcao' apenas se ela nunca tiver sido marcada como concluída
+    antes (registrado na tabela 'migracoes_executadas'). Isso evita repetir
+    operações de DDL (que mexem na estrutura das tabelas) toda vez que o
+    processo do servidor reinicia — o que, contra um banco em nuvem, pode
+    gerar corrida entre execuções e erros como "no such table" ao tentar
+    apagar algo que uma execução anterior (de outro processo) já apagou.
+
+    Se 'funcao' lançar uma exceção, a migração NÃO é marcada como concluída
+    (para poder ser tentada de novo depois, inclusive manualmente pelo
+    painel de diagnóstico em Configurações).
+    """
+    try:
+        ja_feita = fetch_one("SELECT 1 FROM migracoes_executadas WHERE nome = ?", (nome,))
+    except Exception:
+        ja_feita = None
+    if ja_feita:
+        return
+    try:
+        funcao()
+        execute("INSERT OR IGNORE INTO migracoes_executadas (nome) VALUES (?)", (nome,))
+    except Exception as e:
+        print(f"[MIGRAÇÃO] '{nome}' não concluída, será tentada novamente depois: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+
+
 def _reconciliar_residuos_de_tentativas_antigas(tabela: str, colunas: list):
     """
     Versões anteriores desta correção tentavam remover o UNIQUE recriando a
@@ -578,7 +622,7 @@ def _reconciliar_residuos_de_tentativas_antigas(tabela: str, colunas: list):
             conn.execute(
                 f"INSERT OR IGNORE INTO {tabela} ({colunas_str}) SELECT {colunas_str} FROM {nome_residuo}"
             )
-            conn.execute(f"DROP TABLE {nome_residuo}")
+            conn.execute(f"DROP TABLE IF EXISTS {nome_residuo}")
             conn.commit()
         except Exception as e:
             try:
