@@ -331,37 +331,92 @@ def _garantir_coluna(tabela: str, coluna: str, definicao_sql: str):
 
 def _corrigir_chaves_estrangeiras_residuais():
     """
-    Corrige silenciosamente as chaves estrangeiras de tabelas filhas (como despesas_fixas) 
-    que ficaram apontando para tabelas temporárias (ex: cartoes_migracao_old) 
-    após migrações interrompidas em versões antigas.
+    No Turso (libsql), PRAGMA writable_schema = ON não é permitido por segurança.
+    Portanto, recriamos as tabelas afetadas de forma 100% segura (explicitando 
+    colunas) para purgar qualquer Foreign Key apontando para tabelas "_migracao_old",
+    preservando todos os dados.
     """
-    conn = _nova_conexao()
     try:
-        conn.execute("PRAGMA writable_schema = ON")
-        conn.execute("""
-            UPDATE sqlite_master 
-            SET sql = REPLACE(REPLACE(sql, '_migracao_old', ''), '__nova_sem_unique', '') 
-            WHERE type = 'table' AND (sql LIKE '%_migracao_old%' OR sql LIKE '%__nova_sem_unique%')
-        """)
-        conn.execute("PRAGMA writable_schema = OFF")
-        conn.commit()
+        tabelas = fetch_all("SELECT name FROM sqlite_master WHERE type='table' AND (sql LIKE '%_migracao_old%' OR sql LIKE '%__nova_sem_unique%')")
+        nomes = [t["name"] for t in tabelas]
+
+        if "despesas_fixas" not in nomes and "despesas" not in nomes:
+            return 
+
+        try: execute("DROP TABLE IF EXISTS despesas_bkp")
+        except: pass
+        try: execute("DROP TABLE IF EXISTS despesas_fixas_bkp")
+        except: pass
+
+        if "despesas" in nomes:
+            execute("ALTER TABLE despesas RENAME TO despesas_bkp")
+        if "despesas_fixas" in nomes:
+            execute("ALTER TABLE despesas_fixas RENAME TO despesas_fixas_bkp")
+
+        if "despesas_fixas" in nomes:
+            execute("""
+            CREATE TABLE despesas_fixas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                descricao TEXT NOT NULL,
+                categoria_id INTEGER,
+                valor REAL NOT NULL,
+                forma_pagamento TEXT NOT NULL,
+                cartao_id INTEGER,
+                dia_vencimento INTEGER DEFAULT 1,
+                ativa INTEGER DEFAULT 1,
+                user_id INTEGER DEFAULT NULL,
+                FOREIGN KEY (categoria_id) REFERENCES categorias(id),
+                FOREIGN KEY (cartao_id) REFERENCES cartoes(id)
+            )""")
+            execute("""
+            INSERT INTO despesas_fixas 
+            (id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id)
+            SELECT id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id 
+            FROM despesas_fixas_bkp
+            """)
+
+        if "despesas" in nomes:
+            execute("""
+            CREATE TABLE despesas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data_compra TEXT NOT NULL,
+                data_competencia TEXT NOT NULL,
+                categoria_id INTEGER,
+                descricao TEXT NOT NULL,
+                valor REAL NOT NULL,
+                forma_pagamento TEXT NOT NULL,
+                cartao_id INTEGER,
+                parcela_atual INTEGER DEFAULT 1,
+                parcela_total INTEGER DEFAULT 1,
+                compra_grupo TEXT,
+                fixa INTEGER DEFAULT 0,
+                fixa_origem_id INTEGER,
+                user_id INTEGER DEFAULT NULL,
+                FOREIGN KEY (categoria_id) REFERENCES categorias(id),
+                FOREIGN KEY (cartao_id) REFERENCES cartoes(id),
+                FOREIGN KEY (fixa_origem_id) REFERENCES despesas_fixas(id)
+            )""")
+            execute("""
+            INSERT INTO despesas 
+            (id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id)
+            SELECT id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id 
+            FROM despesas_bkp
+            """)
+
+        if "despesas" in nomes:
+            try: execute("DROP TABLE despesas_bkp")
+            except: pass
+        if "despesas_fixas" in nomes:
+            try: execute("DROP TABLE despesas_fixas_bkp")
+            except: pass
+
     except Exception as e:
-        try:
-            conn.execute("PRAGMA writable_schema = OFF")
-            conn.rollback()
-        except Exception:
-            pass
-        print(f"[MIGRAÇÃO] Falha ao corrigir FKs residuais: {e}", file=sys.stderr)
-    finally:
-        conn.close()
+        print(f"[MIGRAÇÃO] Falha ao recriar tabelas (FK): {e}", file=sys.stderr)
 
 
 def init_db():
     """Cria todas as tabelas do sistema, caso ainda não existam (cada instrução isolada)."""
     
-    # 1. Executa a correção preventiva de FKs fantasmas
-    _corrigir_chaves_estrangeiras_residuais()
-
     execute("""
     CREATE TABLE IF NOT EXISTS categorias (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -514,6 +569,9 @@ def init_db():
         """)
     except Exception:
         pass
+
+    # Após garantir que todas as colunas existem, purga as Foreign Keys fantasmas
+    _corrigir_chaves_estrangeiras_residuais()
 
     # ---------------------------------------------------------------------
     # MIGRAÇÃO CRÍTICA: bancos criados em versões antigas do app tinham uma
