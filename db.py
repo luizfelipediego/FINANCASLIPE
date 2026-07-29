@@ -241,12 +241,22 @@ def _corrigir_chaves_estrangeiras_residuais():
                 id INTEGER PRIMARY KEY AUTOINCREMENT, descricao TEXT NOT NULL, categoria_id INTEGER,
                 valor REAL NOT NULL, forma_pagamento TEXT NOT NULL, cartao_id INTEGER,
                 dia_vencimento INTEGER DEFAULT 1, ativa INTEGER DEFAULT 1, user_id INTEGER DEFAULT NULL,
+                caixa TEXT DEFAULT 'PF (Pessoal)', responsavel TEXT DEFAULT 'Conjunto',
                 FOREIGN KEY (categoria_id) REFERENCES categorias(id), FOREIGN KEY (cartao_id) REFERENCES cartoes(id)
             )""")
-            execute("""
-            INSERT INTO despesas_fixas (id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id)
-            SELECT id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id FROM despesas_fixas_bkp
-            """)
+            # Copiando com tratamento caso caixa e responsavel não existam na bkp
+            colunas_bkp = [c["name"] for c in fetch_all("PRAGMA table_info(despesas_fixas_bkp)")]
+            extra_cols = ""
+            if "caixa" in colunas_bkp and "responsavel" in colunas_bkp:
+                execute("""
+                INSERT INTO despesas_fixas (id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id, caixa, responsavel)
+                SELECT id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id, caixa, responsavel FROM despesas_fixas_bkp
+                """)
+            else:
+                execute("""
+                INSERT INTO despesas_fixas (id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id)
+                SELECT id, descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id FROM despesas_fixas_bkp
+                """)
 
         if "despesas" in nomes:
             execute("""
@@ -255,13 +265,21 @@ def _corrigir_chaves_estrangeiras_residuais():
                 categoria_id INTEGER, descricao TEXT NOT NULL, valor REAL NOT NULL, forma_pagamento TEXT NOT NULL,
                 cartao_id INTEGER, parcela_atual INTEGER DEFAULT 1, parcela_total INTEGER DEFAULT 1,
                 compra_grupo TEXT, fixa INTEGER DEFAULT 0, fixa_origem_id INTEGER, user_id INTEGER DEFAULT NULL,
+                caixa TEXT DEFAULT 'PF (Pessoal)', responsavel TEXT DEFAULT 'Conjunto',
                 FOREIGN KEY (categoria_id) REFERENCES categorias(id), FOREIGN KEY (cartao_id) REFERENCES cartoes(id),
                 FOREIGN KEY (fixa_origem_id) REFERENCES despesas_fixas(id)
             )""")
-            execute("""
-            INSERT INTO despesas (id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id)
-            SELECT id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id FROM despesas_bkp
-            """)
+            colunas_bkp = [c["name"] for c in fetch_all("PRAGMA table_info(despesas_bkp)")]
+            if "caixa" in colunas_bkp and "responsavel" in colunas_bkp:
+                execute("""
+                INSERT INTO despesas (id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id, caixa, responsavel)
+                SELECT id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id, caixa, responsavel FROM despesas_bkp
+                """)
+            else:
+                execute("""
+                INSERT INTO despesas (id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id)
+                SELECT id, data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id FROM despesas_bkp
+                """)
 
         if "despesas" in nomes:
             try: execute("DROP TABLE despesas_bkp")
@@ -286,12 +304,14 @@ def init_db():
     execute("""
     CREATE TABLE IF NOT EXISTS despesas_fixas (
         id INTEGER PRIMARY KEY AUTOINCREMENT, descricao TEXT NOT NULL, categoria_id INTEGER, valor REAL NOT NULL, forma_pagamento TEXT NOT NULL, cartao_id INTEGER, dia_vencimento INTEGER DEFAULT 1, ativa INTEGER DEFAULT 1, user_id INTEGER DEFAULT NULL,
+        caixa TEXT DEFAULT 'PF (Pessoal)', responsavel TEXT DEFAULT 'Conjunto',
         FOREIGN KEY (categoria_id) REFERENCES categorias(id), FOREIGN KEY (cartao_id) REFERENCES cartoes(id)
     )
     """)
     execute("""
     CREATE TABLE IF NOT EXISTS despesas (
         id INTEGER PRIMARY KEY AUTOINCREMENT, data_compra TEXT NOT NULL, data_competencia TEXT NOT NULL, categoria_id INTEGER, descricao TEXT NOT NULL, valor REAL NOT NULL, forma_pagamento TEXT NOT NULL, cartao_id INTEGER, parcela_atual INTEGER DEFAULT 1, parcela_total INTEGER DEFAULT 1, compra_grupo TEXT, fixa INTEGER DEFAULT 0, fixa_origem_id INTEGER, user_id INTEGER DEFAULT NULL,
+        caixa TEXT DEFAULT 'PF (Pessoal)', responsavel TEXT DEFAULT 'Conjunto',
         FOREIGN KEY (categoria_id) REFERENCES categorias(id), FOREIGN KEY (cartao_id) REFERENCES cartoes(id), FOREIGN KEY (fixa_origem_id) REFERENCES despesas_fixas(id)
     )
     """)
@@ -325,6 +345,13 @@ def init_db():
     _garantir_coluna("despesas", "fixa_origem_id", "INTEGER")
     _garantir_coluna("users", "reset_token", "TEXT DEFAULT NULL")
     _garantir_coluna("users", "reset_token_expires_at", "TEXT DEFAULT NULL")
+    
+    # Adiciona colunas para a nova funcionalidade PF/PJ e Tags
+    _garantir_coluna("receitas", "caixa", "TEXT DEFAULT 'PF (Pessoal)'")
+    _garantir_coluna("despesas", "caixa", "TEXT DEFAULT 'PF (Pessoal)'")
+    _garantir_coluna("despesas", "responsavel", "TEXT DEFAULT 'Conjunto'")
+    _garantir_coluna("despesas_fixas", "caixa", "TEXT DEFAULT 'PF (Pessoal)'")
+    _garantir_coluna("despesas_fixas", "responsavel", "TEXT DEFAULT 'Conjunto'")
 
     try:
         execute("""
@@ -521,8 +548,8 @@ def delete_cartao(cartao_id: int, requesting_user: dict):
     if not before or not _can_access_record(requesting_user, before.get("user_id")): raise PermissionError("Sem permissão.")
     execute("DELETE FROM cartoes WHERE id = ?", (cartao_id,))
 
-def add_receita(data_str: str, origem: str, valor: float, observacao: str = "", user_id: int = None):
-    execute("INSERT INTO receitas (data, origem, valor, observacao, user_id) VALUES (?, ?, ?, ?, ?)", (data_str, origem, valor, observacao, user_id))
+def add_receita(data_str: str, origem: str, valor: float, observacao: str = "", caixa: str = "PF (Pessoal)", user_id: int = None):
+    execute("INSERT INTO receitas (data, origem, valor, observacao, caixa, user_id) VALUES (?, ?, ?, ?, ?, ?)", (data_str, origem, valor, observacao, caixa, user_id))
 
 def list_receitas(requesting_user: dict = None, ano: int = None, mes: int = None):
     if not requesting_user: return []
@@ -551,10 +578,7 @@ def calcular_primeira_competencia(data_compra: date, forma_pagamento: str, carta
     return date(data_compra.year, data_compra.month, 1)
 
 def add_despesa(data_compra: date, categoria_id: int, descricao: str, valor_total: float,
-                forma_pagamento: str, cartao_id: int = None, parcelas: int = 1, primeira_competencia: date = None, user_id: int = None):
-    """
-    Registra uma despesa e permite forçar a data de vencimento da 1ª parcela.
-    """
+                forma_pagamento: str, cartao_id: int = None, parcelas: int = 1, primeira_competencia: date = None, caixa: str = "PF (Pessoal)", responsavel: str = "Conjunto", user_id: int = None):
     if primeira_competencia is None:
         cartao_row = fetch_one("SELECT * FROM cartoes WHERE id = ?", (cartao_id,)) if cartao_id else None
         primeira_competencia = calcular_primeira_competencia(data_compra, forma_pagamento, cartao_row)
@@ -576,25 +600,22 @@ def add_despesa(data_compra: date, categoria_id: int, descricao: str, valor_tota
             INSERT INTO despesas
             (data_compra, data_competencia, categoria_id, descricao, valor,
              forma_pagamento, cartao_id, parcela_atual, parcela_total,
-             compra_grupo, fixa, fixa_origem_id, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+             compra_grupo, fixa, fixa_origem_id, caixa, responsavel, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)
         """, (
             data_compra.isoformat(), competencia_i.isoformat(), categoria_id, descricao,
-            valor_i, forma_pagamento, cartao_id, i + 1, parcelas, grupo, user_id
+            valor_i, forma_pagamento, cartao_id, i + 1, parcelas, grupo, caixa, responsavel, user_id
         ))
 
-def edit_despesa(despesa_id: int, data_compra: str, data_competencia: str, categoria_id: int, descricao: str, valor: float, forma_pagamento: str, cartao_id: int, requesting_user: dict):
-    """Permite a edição manual de todos os campos de uma parcela."""
+def edit_despesa(despesa_id: int, data_compra: str, data_competencia: str, categoria_id: int, descricao: str, valor: float, forma_pagamento: str, cartao_id: int, caixa: str, responsavel: str, requesting_user: dict):
     before = fetch_one("SELECT * FROM despesas WHERE id = ?", (despesa_id,))
     if not before or not _can_access_record(requesting_user, before.get("user_id")):
         raise PermissionError("Sem permissão para editar esta despesa.")
     execute("""
         UPDATE despesas 
-        SET data_compra = ?, data_competencia = ?, categoria_id = ?, descricao = ?, valor = ?, forma_pagamento = ?, cartao_id = ? 
+        SET data_compra = ?, data_competencia = ?, categoria_id = ?, descricao = ?, valor = ?, forma_pagamento = ?, cartao_id = ?, caixa = ?, responsavel = ? 
         WHERE id = ?
-    """, (data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, despesa_id))
-    after = fetch_one("SELECT * FROM despesas WHERE id = ?", (despesa_id,))
-    log_action(requesting_user.get("id"), "UPDATE", "despesas", despesa_id, before, after)
+    """, (data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, caixa, responsavel, despesa_id))
 
 def list_despesas(requesting_user: dict = None, ano: int = None, mes: int = None):
     if not requesting_user: return []
@@ -665,7 +686,7 @@ def list_compras_por_tipo(requesting_user: dict = None, forma_pagamento: str = N
             "cartao_nome": primeira["cartao_nome"], "forma_pagamento": primeira["forma_pagamento"], "data_compra": primeira["data_compra"],
             "valor_total": valor_total, "valor_parcela": valor_parcela, "parcela_total": parcela_total,
             "parcelas_pagas": parcelas_pagas, "parcelas_restantes": parcelas_restantes, "valor_pago": valor_pago,
-            "valor_restante": valor_restante, "concluido": parcelas_restantes == 0,
+            "valor_restante": valor_restante, "concluido": parcelas_restantes == 0, "caixa": primeira.get("caixa")
         })
     resultado.sort(key=lambda x: (x["concluido"], -x["parcelas_restantes"]))
     return resultado
@@ -684,10 +705,10 @@ def delete_grupo(compra_grupo: str, requesting_user: dict):
         if not _can_access_record(requesting_user, r.get("user_id")): raise PermissionError("Sem permissão.")
     execute("DELETE FROM despesas WHERE compra_grupo = ?", (compra_grupo,))
 
-def add_despesa_fixa(descricao: str, categoria_id: int, valor: float, forma_pagamento: str, cartao_id: int = None, dia_vencimento: int = 1, user_id: int = None):
+def add_despesa_fixa(descricao: str, categoria_id: int, valor: float, forma_pagamento: str, cartao_id: int = None, dia_vencimento: int = 1, caixa: str = "PF (Pessoal)", responsavel: str = "Conjunto", user_id: int = None):
     _execute_autocura_unique(
-        "INSERT INTO despesas_fixas (descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, user_id) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-        (descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, user_id), "despesas_fixas", _migrar_despesas_fixas_remover_unique_global
+        "INSERT INTO despesas_fixas (descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, ativa, caixa, responsavel, user_id) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        (descricao, categoria_id, valor, forma_pagamento, cartao_id, dia_vencimento, caixa, responsavel, user_id), "despesas_fixas", _migrar_despesas_fixas_remover_unique_global
     )
 
 def list_despesas_fixas(requesting_user: dict = None, somente_ativas: bool = False):
@@ -719,9 +740,9 @@ def gerar_despesas_fixas_do_mes(ano: int, mes: int, requesting_user: dict = None
         dia = min(f.get("dia_vencimento") or 1, calendar.monthrange(ano, mes)[1])
         data_ocorrencia = date(ano, mes, dia)
         execute("""
-            INSERT INTO despesas (data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?)
-        """, (data_ocorrencia.isoformat(), competencia, f["categoria_id"], f["descricao"], f["valor"], f["forma_pagamento"], f["cartao_id"], str(uuid.uuid4()), f["id"], f.get("user_id")))
+            INSERT INTO despesas (data_compra, data_competencia, categoria_id, descricao, valor, forma_pagamento, cartao_id, parcela_atual, parcela_total, compra_grupo, fixa, fixa_origem_id, caixa, responsavel, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?, ?, ?)
+        """, (data_ocorrencia.isoformat(), competencia, f["categoria_id"], f["descricao"], f["valor"], f["forma_pagamento"], f["cartao_id"], str(uuid.uuid4()), f["id"], f.get("caixa") or "PF (Pessoal)", f.get("responsavel") or "Conjunto", f.get("user_id")))
         criados += 1
     return criados
 
