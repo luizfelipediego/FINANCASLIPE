@@ -5,6 +5,7 @@ app.py
 Sistema de Gestão Financeira Pessoal e Familiar (com autenticação de usuário)
 """
 from datetime import date, datetime
+import calendar
 import io
 import json
 
@@ -31,6 +32,37 @@ OPCOES_CAIXA = ["PF (Pessoal)", "PJ (Paiva Projetos e Consultoria)"]
 OPCOES_RESPONSAVEL = ["Conjunto", "Felipe", "Esposa"]
 
 HOJE = date.today()
+
+# --- CSS GLOBAL: TRANSFORMA O MENU LATERAL EM BOTÕES FLUTUANTES ---
+st.markdown("""
+    <style>
+    div[data-testid="stSidebar"] div.stRadio > div[role="radiogroup"] {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+    div[data-testid="stSidebar"] div.stRadio > div[role="radiogroup"] > label {
+        background-color: #1E212B;
+        border: 1px solid #00FFAA;
+        border-radius: 8px;
+        padding: 10px 15px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+    }
+    div[data-testid="stSidebar"] div.stRadio > div[role="radiogroup"] > label:hover {
+        background-color: #00FFAA;
+        transform: scale(1.03);
+    }
+    div[data-testid="stSidebar"] div.stRadio > div[role="radiogroup"] > label:hover p {
+        color: #1E212B !important;
+        font-weight: 800;
+    }
+    div[data-testid="stSidebar"] div.stRadio > div[role="radiogroup"] > label span[data-baseweb="radio"] {
+        display: none;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 def garantir_fixas_geradas(user, ano, mes):
     try:
@@ -91,6 +123,52 @@ st.markdown(
 )
 
 if pagina == "📊 Dashboard":
+    
+    # --- MENU FLUTUANTE DE ATALHOS PARA O DASHBOARD ---
+    st.markdown("""
+        <style>
+        .floating-menu {
+            position: fixed;
+            bottom: 30px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .fab-button {
+            background-color: #1E212B;
+            color: #00FFAA !important;
+            border: 1px solid #00FFAA;
+            border-radius: 20px;
+            padding: 8px 15px;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 600;
+            text-align: right;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            transition: all 0.2s ease-in-out;
+            opacity: 0.6;
+        }
+        .fab-button:hover {
+            background-color: #00FFAA;
+            color: #1E212B !important;
+            transform: scale(1.05);
+            opacity: 1;
+        }
+        </style>
+        <div class="floating-menu">
+            <a href="#ancora-kpis" class="fab-button">📊 Resumo Geral</a>
+            <a href="#ancora-proventos" class="fab-button">📈 Rendimentos</a>
+            <a href="#ancora-graficos" class="fab-button">📉 Gráficos</a>
+            <a href="#ancora-alertas" class="fab-button">🚦 Alertas</a>
+            <a href="#ancora-projeto18" class="fab-button">🚀 Projeto 18</a>
+            <a href="#ancora-compras" class="fab-button">💳 Compras</a>
+            <a href="#ancora-edicao" class="fab-button">✏️ Editar</a>
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div id='ancora-kpis'></div>", unsafe_allow_html=True)
     st.title(f"📊 Dashboard — {utils.MESES_PT[mes_sel]}/{ano_sel}")
     garantir_fixas_geradas(user, ano_sel, mes_sel)
 
@@ -101,7 +179,6 @@ if pagina == "📊 Dashboard":
     receitas_raw = db.list_receitas(user, ano=ano_sel, mes=mes_sel)
     despesas_raw = db.list_despesas(user, ano=ano_sel, mes=mes_sel)
 
-    # Filtro Dinâmico PF/PJ
     if filtro_caixa != "Consolidado":
         receitas_list = [r for r in receitas_raw if r.get('caixa') == filtro_caixa or (filtro_caixa == "PF (Pessoal)" and not r.get('caixa'))]
         despesas_list = [d for d in despesas_raw if d.get('caixa') == filtro_caixa or (filtro_caixa == "PF (Pessoal)" and not d.get('caixa'))]
@@ -122,7 +199,32 @@ if pagina == "📊 Dashboard":
     delta_str = "- Atenção: negativo" if saldo_livre < 0 else "Saldo Saudável"
     col4.metric("Saldo Livre Líquido", utils.formatar_moeda(saldo_livre), delta=delta_str)
 
+    if st.button("🎉 Consolidar Resultado do Mês"):
+        if saldo_livre >= 0:
+            st.balloons()
+            st.success("Excelente! Você fechou o mês no azul e dentro do planejamento.")
+        else:
+            st.warning("O mês fechou negativo. Revise a seção de alertas de teto de gastos abaixo.")
+
     st.markdown("---")
+    st.markdown("<div id='ancora-proventos'></div>", unsafe_allow_html=True)
+    st.subheader("📈 Proventos e Renda Passiva (BTG Pactual / FIIs)")
+    st.caption("Evolução dos rendimentos que trabalham por você isolados do seu fluxo de caixa principal.")
+    df_rec = utils.receitas_para_dataframe(receitas_list)
+    if not df_rec.empty:
+        df_rend = df_rec[df_rec['origem'].str.contains('Rendimentos', case=False, na=False)]
+        if not df_rend.empty:
+            fig_rend = px.bar(df_rend, x='data', y='valor', text='valor', title="", color_discrete_sequence=['#00FFAA'])
+            fig_rend.update_traces(texttemplate='R$ %{text:.2f}', textposition='outside')
+            fig_rend.update_layout(xaxis_title="", yaxis_title="Rendimento Diário", margin=dict(t=10, b=0, l=0, r=0))
+            st.plotly_chart(fig_rend, width='stretch')
+        else:
+            st.info("Nenhum rendimento de FIIs ou Renda Fixa lançado neste mês.")
+    else:
+        st.info("Nenhum rendimento de FIIs ou Renda Fixa lançado neste mês.")
+
+    st.markdown("---")
+    st.markdown("<div id='ancora-graficos'></div>", unsafe_allow_html=True)
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Distribuição por Categoria")
@@ -148,7 +250,13 @@ if pagina == "📊 Dashboard":
             st.info("Sem dados de responsáveis neste filtro.")
 
     st.markdown("---")
-    st.subheader("🚦 Alertas de Teto de Gastos")
+    st.markdown("<div id='ancora-alertas'></div>", unsafe_allow_html=True)
+    st.subheader("🚦 Alertas Preditivos de Teto de Gastos")
+    
+    dias_no_mes = calendar.monthrange(ano_sel, mes_sel)[1]
+    dia_atual = HOJE.day if (ano_sel == HOJE.year and mes_sel == HOJE.month) else dias_no_mes
+    progresso_tempo = dia_atual / dias_no_mes
+
     categorias = db.list_categorias(user)
     algum_teto_definido = False
 
@@ -161,13 +269,42 @@ if pagina == "📊 Dashboard":
         
         st.markdown(f"**{cat['nome']}** — {utils.formatar_moeda(gasto)} de {utils.formatar_moeda(cat['teto_mensal'])} ({percentual:.0f}%)")
         st.markdown(f'<div style="background-color:#262730; border-radius:6px; height:14px; width:100%;"><div style="background-color:{cor}; width:{min(percentual, 100)}%; height:14px; border-radius:6px;"></div></div>', unsafe_allow_html=True)
-        if percentual >= 100: st.error(f"⚠️ Teto de **{cat['nome']}** ultrapassado!")
-        elif percentual >= 80: st.warning(f"Atenção: **{cat['nome']}** já atingiu {percentual:.0f}% do teto.")
+        
+        if percentual >= 100: 
+            st.error(f"⚠️ Teto estourado para a categoria **{cat['nome']}**.")
+        elif (percentual / 100) > (progresso_tempo * 1.25): 
+            st.warning(f"Atenção: Ritmo acelerado! Você já consumiu {percentual:.0f}% do teto, mas o mês está apenas {progresso_tempo*100:.0f}% concluído. Segure os gastos.")
+        elif percentual >= 80: 
+            st.info(f"Fique de olho: Você está próximo de bater o limite para **{cat['nome']}**.")
         st.write("")
         
     if not algum_teto_definido: st.info("Nenhum teto de gasto configurado ainda. Defina em '🏷️ Categorias e Orçamento'.")
 
     st.markdown("---")
+    st.markdown("<div id='ancora-projeto18'></div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader("🚀 Fundo de Emancipação (Projeto 18 Anos)")
+        st.caption("Visão gamificada e de longo prazo: projete o efeito multiplicador dos juros compostos para o futuro da sua família.")
+        
+        c_sim1, c_sim2, c_sim3 = st.columns(3)
+        aporte_mensal = c_sim1.number_input("Aporte Mensal Simulado (R$)", value=500.0, step=50.0)
+        taxa_anual = c_sim2.number_input("Taxa de Juros Anual Esperada (%)", value=11.5, step=0.5)
+        anos_horizonte = c_sim3.number_input("Horizonte (Anos)", value=18, step=1)
+        
+        if anos_horizonte > 0:
+            taxa_mensal = (1 + (taxa_anual / 100)) ** (1/12) - 1
+            meses_totais = int(anos_horizonte * 12)
+            montante_final = aporte_mensal * (((1 + taxa_mensal) ** meses_totais - 1) / taxa_mensal) if taxa_mensal > 0 else aporte_mensal * meses_totais
+            juros_acumulados = montante_final - (aporte_mensal * meses_totais)
+            
+            c_res1, c_res2 = st.columns(2)
+            c_res1.metric(f"Patrimônio Estimado em {anos_horizonte} anos", utils.formatar_moeda(montante_final), delta=f"+ {utils.formatar_moeda(juros_acumulados)} em Juros Compostos", delta_color="normal")
+            
+            st.caption(f"Trilha do Projeto (Meta de {meses_totais} meses de disciplina financeira)")
+            st.progress(0.05)
+
+    st.markdown("---")
+    st.markdown("<div id='ancora-compras'></div>", unsafe_allow_html=True)
     st.subheader("📋 Acompanhamento de Compras (Consolidado)")
     st.caption("Visão geral de todos os parcelamentos e financiamentos em andamento.")
     tab_vista, tab_parcelado, tab_financ = st.tabs(["💳 À Vista no Cartão", "📦 Parcelado no Cartão", "🏦 Financiamentos"])
@@ -184,6 +321,99 @@ if pagina == "📊 Dashboard":
         lista_financ = db.list_compras_por_tipo(user, forma_pagamento="Financiamento")
         if filtro_caixa != "Consolidado": lista_financ = [x for x in lista_financ if x.get('caixa', 'PF (Pessoal)') == filtro_caixa]
         st.dataframe(tabela_compras_df(lista_financ), width='stretch', hide_index=True)
+
+    st.markdown("---")
+    st.markdown("<div id='ancora-edicao'></div>", unsafe_allow_html=True)
+    st.subheader("✏️ Editar ou Excluir Lançamentos")
+    st.caption("Acesse e modifique **QUALQUER** lançamento do seu histórico diretamente daqui.")
+
+    todas_despesas = db.list_despesas(user)
+    
+    if todas_despesas:
+        opcoes_dict = {
+            f"Venc: {d['data_competencia']} | {d['descricao']} ({d['parcela_atual']}/{d['parcela_total']}) | R$ {d['valor']} | ID {d['id']}": d["id"]
+            for d in todas_despesas
+        }
+        
+        escolha = st.selectbox("Busque a despesa que deseja corrigir:", [None] + list(opcoes_dict.keys()))
+        
+        if escolha:
+            id_acao = opcoes_dict[escolha]
+            desp_edit = next((d for d in todas_despesas if d["id"] == id_acao), None)
+            
+            if desp_edit:
+                cartoes = db.list_cartoes(user)
+                nomes_categorias = {c["nome"]: c["id"] for c in categorias}
+                
+                def _rotulo_cartao(c):
+                    selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
+                    return f"{selo} — {c['nome']}" if selo else c["nome"]
+                nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
+                
+                with st.container(border=True):
+                    st.markdown(f"### Ajustando: {desp_edit['descricao']}")
+                    
+                    with st.form("form_edit_dash"):
+                        cx_edit1, cx_edit2 = st.columns(2)
+                        idx_cx = OPCOES_CAIXA.index(desp_edit.get("caixa", "PF (Pessoal)")) if desp_edit.get("caixa") in OPCOES_CAIXA else 0
+                        edit_caixa = cx_edit1.selectbox("Caixa", OPCOES_CAIXA, index=idx_cx)
+                        
+                        idx_resp = OPCOES_RESPONSAVEL.index(desp_edit.get("responsavel", "Conjunto")) if desp_edit.get("responsavel") in OPCOES_RESPONSAVEL else 0
+                        edit_resp = cx_edit2.selectbox("Responsável", OPCOES_RESPONSAVEL, index=idx_resp)
+
+                        e_c1, e_c2 = st.columns(2)
+                        edit_data_compra = e_c1.date_input("Data da Compra", value=datetime.strptime(desp_edit["data_compra"], "%Y-%m-%d").date())
+                        edit_data_venc = e_c2.date_input("Data de Vencimento", value=datetime.strptime(desp_edit["data_competencia"], "%Y-%m-%d").date())
+                        
+                        edit_desc = st.text_input("Descrição", value=desp_edit["descricao"])
+                        
+                        e_c3, e_c4 = st.columns(2)
+                        idx_cat = list(nomes_categorias.values()).index(desp_edit["categoria_id"]) if desp_edit["categoria_id"] in nomes_categorias.values() else 0
+                        edit_cat = e_c3.selectbox("Categoria", list(nomes_categorias.keys()), index=idx_cat)
+                        
+                        idx_forma = FORMAS_PAGAMENTO.index(desp_edit["forma_pagamento"]) if desp_edit["forma_pagamento"] in FORMAS_PAGAMENTO else 0
+                        edit_forma = e_c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO, index=idx_forma)
+                        
+                        edit_cartao_nome = None
+                        if edit_forma in ("Cartão de Crédito", "Cartão de Débito"):
+                            idx_cartao = 0
+                            if desp_edit["cartao_id"] and desp_edit["cartao_id"] in nomes_cartoes.values():
+                                idx_cartao = list(nomes_cartoes.values()).index(desp_edit["cartao_id"])
+                            if nomes_cartoes:
+                                edit_cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()), index=idx_cartao)
+                            else:
+                                st.warning("Nenhum cartão cadastrado.")
+                                
+                        edit_valor = st.number_input("Valor da Parcela (R$)", min_value=0.0, step=10.0, format="%.2f", value=float(desp_edit["valor"]))
+                        
+                        salvar_edicao = st.form_submit_button("💾 Salvar Alterações da Parcela")
+                        
+                        if salvar_edicao:
+                            try:
+                                novo_cat_id = nomes_categorias.get(edit_cat)
+                                novo_cartao_id = nomes_cartoes.get(edit_cartao_nome) if edit_cartao_nome else None
+                                db.edit_despesa(id_acao, edit_data_compra.isoformat(), edit_data_venc.isoformat(), novo_cat_id, edit_desc, edit_valor, edit_forma, novo_cartao_id, edit_caixa, edit_resp, user)
+                                st.success("Lançamento atualizado com sucesso!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao editar: {e}")
+                                
+                    st.markdown("**🗑️ Opções de Exclusão Rápida:**")
+                    col_del1, col_del2 = st.columns(2)
+                    if col_del1.button("🗑️ Apagar APENAS esta parcela", key="del_one"):
+                        try:
+                            db.delete_despesa(id_acao, user)
+                            st.success("Parcela excluída.")
+                            st.rerun()
+                        except PermissionError as e: st.error(str(e))
+                    
+                    if desp_edit["parcela_total"] > 1:
+                        if col_del2.button("⚠️ Apagar TODAS as parcelas desta compra", key="del_all"):
+                            try:
+                                db.delete_grupo(desp_edit["compra_grupo"], user)
+                                st.success("Todas as parcelas da compra foram apagadas permanentemente.")
+                                st.rerun()
+                            except PermissionError as e: st.error(str(e))
 
 elif pagina == "📥 Receitas":
     st.title("📥 Receitas (Entradas)")
@@ -309,74 +539,6 @@ elif pagina == "📤 Despesas":
             df_show.columns = ["ID", "Caixa", "Responsável", "Vencimento", "Categoria", "Descrição", "Valor", "Pagamento", "Cartão", "Parcela"]
             st.dataframe(df_show, width='stretch', hide_index=True)
 
-            st.markdown("---")
-            st.subheader("✏️ Editar ou Excluir Lançamentos do Mês")
-            id_acao = st.selectbox("Selecione o ID para editar:", [None] + df["id"].tolist(), key="sel_id_acao")
-            
-            if id_acao:
-                desp_edit = next((d for d in despesas if d["id"] == id_acao), None)
-                if desp_edit:
-                    with st.container(border=True):
-                        st.markdown(f"### Ajustando: {desp_edit['descricao']}")
-                        
-                        cx_edit1, cx_edit2 = st.columns(2)
-                        idx_cx = OPCOES_CAIXA.index(desp_edit.get("caixa", "PF (Pessoal)")) if desp_edit.get("caixa") in OPCOES_CAIXA else 0
-                        edit_caixa = cx_edit1.selectbox("Caixa", OPCOES_CAIXA, index=idx_cx)
-                        
-                        idx_resp = OPCOES_RESPONSAVEL.index(desp_edit.get("responsavel", "Conjunto")) if desp_edit.get("responsavel") in OPCOES_RESPONSAVEL else 0
-                        edit_resp = cx_edit2.selectbox("Responsável", OPCOES_RESPONSAVEL, index=idx_resp)
-
-                        e_c1, e_c2 = st.columns(2)
-                        edit_data_compra = e_c1.date_input("Data da Compra", value=datetime.strptime(desp_edit["data_compra"], "%Y-%m-%d").date(), key="e_dc")
-                        edit_data_venc = e_c2.date_input("Data de Vencimento", value=datetime.strptime(desp_edit["data_competencia"], "%Y-%m-%d").date(), key="e_dv")
-                        
-                        edit_desc = st.text_input("Descrição", value=desp_edit["descricao"], key="e_desc")
-                        
-                        e_c3, e_c4 = st.columns(2)
-                        idx_cat = list(nomes_categorias.values()).index(desp_edit["categoria_id"]) if desp_edit["categoria_id"] in nomes_categorias.values() else 0
-                        edit_cat = e_c3.selectbox("Categoria", list(nomes_categorias.keys()), index=idx_cat, key="e_cat")
-                        
-                        idx_forma = FORMAS_PAGAMENTO.index(desp_edit["forma_pagamento"]) if desp_edit["forma_pagamento"] in FORMAS_PAGAMENTO else 0
-                        edit_forma = e_c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO, index=idx_forma, key="e_forma")
-                        
-                        edit_cartao_nome = None
-                        if edit_forma in ("Cartão de Crédito", "Cartão de Débito"):
-                            idx_cartao = 0
-                            if desp_edit["cartao_id"] and desp_edit["cartao_id"] in nomes_cartoes.values():
-                                idx_cartao = list(nomes_cartoes.values()).index(desp_edit["cartao_id"])
-                            if nomes_cartoes:
-                                edit_cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()), index=idx_cartao, key="e_cartao")
-                                
-                        edit_valor = st.number_input("Valor da Parcela (R$)", min_value=0.0, step=10.0, format="%.2f", value=float(desp_edit["valor"]), key="e_val")
-                        
-                        salvar_edicao = st.button("💾 Salvar Alterações da Parcela", type="primary", key="btn_salv")
-                        
-                        if salvar_edicao:
-                            try:
-                                novo_cat_id = nomes_categorias.get(edit_cat)
-                                novo_cartao_id = nomes_cartoes.get(edit_cartao_nome) if edit_cartao_nome else None
-                                db.edit_despesa(id_acao, edit_data_compra.isoformat(), edit_data_venc.isoformat(), novo_cat_id, edit_desc, edit_valor, edit_forma, novo_cartao_id, edit_caixa, edit_resp, user)
-                                st.success("Lançamento atualizado com sucesso!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao editar: {e}")
-                                
-                        col_del1, col_del2 = st.columns(2)
-                        if col_del1.button("🗑️ Apagar APENAS esta parcela", key="del_one_mes"):
-                            try:
-                                db.delete_despesa(id_acao, user)
-                                st.success("Parcela excluída.")
-                                st.rerun()
-                            except PermissionError as e: st.error(str(e))
-                        
-                        if desp_edit["parcela_total"] > 1:
-                            if col_del2.button("⚠️ Apagar TODAS as parcelas desta compra", key="del_all_mes"):
-                                try:
-                                    db.delete_grupo(desp_edit["compra_grupo"], user)
-                                    st.success("Todas as parcelas excluídas.")
-                                    st.rerun()
-                                except PermissionError as e: st.error(str(e))
-
     with tab_fixas:
         st.caption("Gere os lançamentos automáticos de cada caixa e responsável.")
         categorias = db.list_categorias(user)
@@ -448,11 +610,11 @@ elif pagina == "📤 Despesas":
             else: st.info("Todos os lançamentos deste mês já haviam sido gerados anteriormente.")
 
     with tab_cartoes:
-        st.caption("O selo abaixo (emoji colorido) é apenas uma identificação visual — não reproduz a logomarca oficial de nenhum banco, já que são marcas registradas.")
+        st.caption("O selo abaixo (emoji colorido) é apenas uma identificação visual.")
         with st.form("form_cartao", clear_on_submit=True):
             c1, c2 = st.columns(2)
             banco = c1.selectbox("Banco / Instituição", list(utils.BANCOS_EMOJI.keys()), format_func=lambda b: utils.BANCOS_EMOJI[b])
-            nome = c2.text_input("Apelido do cartão (ex: Nubank Roxinho, Itaú Platinum)")
+            nome = c2.text_input("Apelido do cartão")
             c3, c4 = st.columns(2)
             dia_fechamento = c3.number_input("Dia de fechamento da fatura", min_value=1, max_value=28, value=25)
             dia_vencimento = c4.number_input("Dia de vencimento da fatura", min_value=1, max_value=28, value=5)
@@ -480,7 +642,7 @@ elif pagina == "📤 Despesas":
                     db.delete_cartao(id_excluir, user)
                     st.rerun()
                 except (PermissionError, db.RegistroVinculadoError) as e: st.error(str(e))
-            
+
 elif pagina == "🏷️ Categorias e Orçamento":
     st.title("🏷️ Categorias de Despesa e Teto de Gastos")
     with st.form("form_categoria", clear_on_submit=True):
