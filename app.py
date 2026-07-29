@@ -106,7 +106,6 @@ if pagina == "📊 Dashboard":
     col2.metric("Total de Despesas", utils.formatar_moeda(resumo["total_despesas"]))
     col3.metric(f"Reserva ({resumo['percentual_reserva']:.1f}%)", utils.formatar_moeda(resumo["valor_reserva"]))
     
-    # O Delta começando com o sinal negativo "-" força o Streamlit a pintá-lo de vermelho
     delta_str = "- Atenção: negativo" if resumo["saldo_livre"] < 0 else None
     col4.metric("Saldo Livre Líquido", utils.formatar_moeda(resumo["saldo_livre"]), delta=delta_str)
 
@@ -283,22 +282,23 @@ elif pagina == "📤 Despesas":
             df_show = df.copy()
             df_show["valor"] = df_show["valor"].apply(utils.formatar_moeda)
             df_show["parcela"] = df_show["parcela_atual"].astype(str) + "/" + df_show["parcela_total"].astype(str)
-            
-            # Aqui mostramos a data_competencia (Vencimento) na tabela para centralizar melhor a informação de quando ela debita
             df_show = df_show[["id", "data_competencia", "categoria_nome", "descricao", "valor", "forma_pagamento", "cartao_nome", "parcela"]]
             df_show.columns = ["ID", "Vencimento", "Categoria", "Descrição", "Valor", "Pagamento", "Cartão", "Parcela"]
             st.dataframe(df_show, width='stretch', hide_index=True)
 
-            st.markdown("---")
-            st.subheader("✏️ Editar ou 🗑️ Excluir Lançamento")
-            st.caption("Selecione o ID na lista acima para modificar ou excluir qualquer informação da parcela (como valor ou vencimento).")
+            st.write("")
             
-            id_acao = st.selectbox("Selecione o ID da despesa:", [None] + df["id"].tolist())
-            
-            if id_acao:
-                desp_edit = next((d for d in despesas if d["id"] == id_acao), None)
-                if desp_edit:
-                    with st.expander("📝 Modificar lançamento selecionado", expanded=True):
+            # --- ÁREA DE EDIÇÃO BEM DESTACADA ---
+            with st.container(border=True):
+                st.subheader("✏️ Editar ou Excluir Lançamento")
+                st.write("Para alterar o valor, a data ou excluir uma despesa que já foi lançada, **selecione o ID dela abaixo:**")
+                
+                id_acao = st.selectbox("ID da Despesa:", [None] + df["id"].tolist())
+                
+                if id_acao:
+                    desp_edit = next((d for d in despesas if d["id"] == id_acao), None)
+                    if desp_edit:
+                        st.markdown(f"### Editando ID: **{id_acao}** ({desp_edit['descricao']})")
                         with st.form("form_edit_despesa"):
                             e_c1, e_c2 = st.columns(2)
                             edit_data_compra = e_c1.date_input("Data da Compra", value=datetime.strptime(desp_edit["data_compra"], "%Y-%m-%d").date())
@@ -337,9 +337,9 @@ elif pagina == "📤 Despesas":
                                 except Exception as e:
                                     st.error(f"Erro ao editar: {e}")
                                     
-                        st.markdown("**Ações de Exclusão:**")
+                        st.markdown("**🗑️ Opções de Exclusão:**")
                         col_del1, col_del2 = st.columns(2)
-                        if col_del1.button("🗑️ Excluir apenas esta parcela"):
+                        if col_del1.button("🗑️ Excluir apenas ESTA parcela"):
                             try:
                                 db.delete_despesa(id_acao, user)
                                 st.success("Parcela excluída.")
