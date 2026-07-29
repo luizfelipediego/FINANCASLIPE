@@ -171,6 +171,93 @@ if pagina == "📊 Dashboard":
         lista_financ = db.list_compras_por_tipo(user, forma_pagamento="Financiamento")
         st.dataframe(tabela_compras_df(lista_financ), width='stretch', hide_index=True)
 
+    # --- NOVA ÁREA CENTRALIZADA DE EDIÇÃO NO DASHBOARD ---
+    st.markdown("---")
+    st.subheader("✏️ Editar ou Excluir Lançamentos")
+    st.caption("Acesse e modifique **QUALQUER** lançamento do seu histórico diretamente daqui. Você pode digitar para pesquisar pela descrição, data ou valor da parcela.")
+
+    # Busca o histórico completo para não depender de filtros de mês
+    todas_despesas = db.list_despesas(user)
+    
+    if todas_despesas:
+        # Cria um dicionário altamente detalhado para a busca
+        opcoes_dict = {
+            f"Venc: {d['data_competencia']} | {d['descricao']} ({d['parcela_atual']}/{d['parcela_total']}) | R$ {d['valor']} | ID {d['id']}": d["id"]
+            for d in todas_despesas
+        }
+        
+        escolha = st.selectbox("Busque a despesa que deseja corrigir:", [None] + list(opcoes_dict.keys()))
+        
+        if escolha:
+            id_acao = opcoes_dict[escolha]
+            desp_edit = next((d for d in todas_despesas if d["id"] == id_acao), None)
+            
+            if desp_edit:
+                cartoes = db.list_cartoes(user)
+                nomes_categorias = {c["nome"]: c["id"] for c in categorias}
+                
+                def _rotulo_cartao(c):
+                    selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
+                    return f"{selo} — {c['nome']}" if selo else c["nome"]
+                nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
+                
+                with st.container(border=True):
+                    st.markdown(f"### Ajustando: {desp_edit['descricao']}")
+                    
+                    with st.form("form_edit_dash"):
+                        e_c1, e_c2 = st.columns(2)
+                        edit_data_compra = e_c1.date_input("Data da Compra", value=datetime.strptime(desp_edit["data_compra"], "%Y-%m-%d").date())
+                        edit_data_venc = e_c2.date_input("Data de Vencimento", value=datetime.strptime(desp_edit["data_competencia"], "%Y-%m-%d").date())
+                        
+                        edit_desc = st.text_input("Descrição", value=desp_edit["descricao"])
+                        
+                        e_c3, e_c4 = st.columns(2)
+                        idx_cat = list(nomes_categorias.values()).index(desp_edit["categoria_id"]) if desp_edit["categoria_id"] in nomes_categorias.values() else 0
+                        edit_cat = e_c3.selectbox("Categoria", list(nomes_categorias.keys()), index=idx_cat)
+                        
+                        idx_forma = FORMAS_PAGAMENTO.index(desp_edit["forma_pagamento"]) if desp_edit["forma_pagamento"] in FORMAS_PAGAMENTO else 0
+                        edit_forma = e_c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO, index=idx_forma)
+                        
+                        edit_cartao_nome = None
+                        if edit_forma in ("Cartão de Crédito", "Cartão de Débito"):
+                            idx_cartao = 0
+                            if desp_edit["cartao_id"] and desp_edit["cartao_id"] in nomes_cartoes.values():
+                                idx_cartao = list(nomes_cartoes.values()).index(desp_edit["cartao_id"])
+                            if nomes_cartoes:
+                                edit_cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()), index=idx_cartao)
+                            else:
+                                st.warning("Nenhum cartão cadastrado.")
+                                
+                        edit_valor = st.number_input("Valor da Parcela (R$)", min_value=0.0, step=10.0, format="%.2f", value=float(desp_edit["valor"]))
+                        
+                        salvar_edicao = st.form_submit_button("💾 Salvar Alterações da Parcela")
+                        
+                        if salvar_edicao:
+                            try:
+                                novo_cat_id = nomes_categorias.get(edit_cat)
+                                novo_cartao_id = nomes_cartoes.get(edit_cartao_nome) if edit_cartao_nome else None
+                                db.edit_despesa(id_acao, edit_data_compra.isoformat(), edit_data_venc.isoformat(), novo_cat_id, edit_desc, edit_valor, edit_forma, novo_cartao_id, user)
+                                st.success("Lançamento atualizado com sucesso!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao editar: {e}")
+                                
+                    st.markdown("**🗑️ Opções de Exclusão Rápida:**")
+                    col_del1, col_del2 = st.columns(2)
+                    if col_del1.button("🗑️ Apagar APENAS esta parcela", key="del_one"):
+                        try:
+                            db.delete_despesa(id_acao, user)
+                            st.success("Parcela excluída.")
+                            st.rerun()
+                        except PermissionError as e: st.error(str(e))
+                    
+                    if col_del2.button("⚠️ Apagar TODAS as parcelas desta compra", key="del_all"):
+                        try:
+                            db.delete_grupo(desp_edit["compra_grupo"], user)
+                            st.success("Todas as parcelas da compra foram apagadas permanentemente.")
+                            st.rerun()
+                        except PermissionError as e: st.error(str(e))
+
 elif pagina == "📥 Receitas":
     st.title("📥 Receitas (Entradas)")
     with st.form("form_receita", clear_on_submit=True):
@@ -208,7 +295,7 @@ elif pagina == "📥 Receitas":
 
 elif pagina == "📤 Despesas":
     st.title("📤 Despesas (Saídas)")
-    st.caption("Tudo o que você lançar aqui — seja uma despesa avulsa, uma despesa fixa gerada automaticamente ou uma compra no cartão — soma no mesmo total de despesas do Dashboard e dos Relatórios. Nada disso muda entre as abas abaixo.")
+    st.caption("Aviso: A edição das despesas agora é feita de forma centralizada e ágil na página '📊 Dashboard'.")
 
     tab_lancar, tab_fixas, tab_cartoes = st.tabs(["📝 Lançar Despesa", "🔁 Despesas Fixas", "💳 Cartões"])
 
@@ -285,74 +372,6 @@ elif pagina == "📤 Despesas":
             df_show = df_show[["id", "data_competencia", "categoria_nome", "descricao", "valor", "forma_pagamento", "cartao_nome", "parcela"]]
             df_show.columns = ["ID", "Vencimento", "Categoria", "Descrição", "Valor", "Pagamento", "Cartão", "Parcela"]
             st.dataframe(df_show, width='stretch', hide_index=True)
-
-            st.write("")
-            
-            # --- ÁREA DE EDIÇÃO BEM DESTACADA ---
-            with st.container(border=True):
-                st.subheader("✏️ Editar ou Excluir Lançamento")
-                st.write("Para alterar o valor, a data ou excluir uma despesa que já foi lançada, **selecione o ID dela abaixo:**")
-                
-                id_acao = st.selectbox("ID da Despesa:", [None] + df["id"].tolist())
-                
-                if id_acao:
-                    desp_edit = next((d for d in despesas if d["id"] == id_acao), None)
-                    if desp_edit:
-                        st.markdown(f"### Editando ID: **{id_acao}** ({desp_edit['descricao']})")
-                        with st.form("form_edit_despesa"):
-                            e_c1, e_c2 = st.columns(2)
-                            edit_data_compra = e_c1.date_input("Data da Compra", value=datetime.strptime(desp_edit["data_compra"], "%Y-%m-%d").date())
-                            edit_data_venc = e_c2.date_input("Data de Vencimento", value=datetime.strptime(desp_edit["data_competencia"], "%Y-%m-%d").date())
-                            
-                            edit_desc = st.text_input("Descrição", value=desp_edit["descricao"])
-                            
-                            e_c3, e_c4 = st.columns(2)
-                            idx_cat = list(nomes_categorias.values()).index(desp_edit["categoria_id"]) if desp_edit["categoria_id"] in nomes_categorias.values() else 0
-                            edit_cat = e_c3.selectbox("Categoria", list(nomes_categorias.keys()), index=idx_cat)
-                            
-                            idx_forma = FORMAS_PAGAMENTO.index(desp_edit["forma_pagamento"]) if desp_edit["forma_pagamento"] in FORMAS_PAGAMENTO else 0
-                            edit_forma = e_c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO, index=idx_forma)
-                            
-                            edit_cartao_nome = None
-                            if edit_forma in ("Cartão de Crédito", "Cartão de Débito"):
-                                idx_cartao = 0
-                                if desp_edit["cartao_id"] and desp_edit["cartao_id"] in nomes_cartoes.values():
-                                    idx_cartao = list(nomes_cartoes.values()).index(desp_edit["cartao_id"])
-                                if nomes_cartoes:
-                                    edit_cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()), index=idx_cartao)
-                                else:
-                                    st.warning("Nenhum cartão cadastrado.")
-                                    
-                            edit_valor = st.number_input("Valor da Parcela (R$)", min_value=0.0, step=10.0, format="%.2f", value=float(desp_edit["valor"]))
-                            
-                            salvar_edicao = st.form_submit_button("💾 Salvar Alterações")
-                            
-                            if salvar_edicao:
-                                try:
-                                    novo_cat_id = nomes_categorias.get(edit_cat)
-                                    novo_cartao_id = nomes_cartoes.get(edit_cartao_nome) if edit_cartao_nome else None
-                                    db.edit_despesa(id_acao, edit_data_compra.isoformat(), edit_data_venc.isoformat(), novo_cat_id, edit_desc, edit_valor, edit_forma, novo_cartao_id, user)
-                                    st.success("Lançamento atualizado com sucesso!")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Erro ao editar: {e}")
-                                    
-                        st.markdown("**🗑️ Opções de Exclusão:**")
-                        col_del1, col_del2 = st.columns(2)
-                        if col_del1.button("🗑️ Excluir apenas ESTA parcela"):
-                            try:
-                                db.delete_despesa(id_acao, user)
-                                st.success("Parcela excluída.")
-                                st.rerun()
-                            except PermissionError as e: st.error(str(e))
-                        
-                        if desp_edit["parcela_total"] > 1:
-                            if col_del2.button("🗑️ Excluir TODAS as parcelas desta compra"):
-                                try:
-                                    db.delete_grupo(desp_edit["compra_grupo"], user)
-                                    st.success("Todas as parcelas da compra foram excluídas.")
-                                    st.rerun()
-                                except PermissionError as e: st.error(str(e))
 
     with tab_fixas:
         st.caption("Ex.: Aluguel, Internet, Assinaturas. Gere os lançamentos do mês com um clique.")
