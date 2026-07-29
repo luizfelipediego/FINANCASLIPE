@@ -5,14 +5,6 @@ utils.py
 Funções auxiliares: formatação de moeda, nomes de meses em português,
 dicionário de bancos (com selo colorido/emoji) e cálculo do resumo (balanço)
 financeiro de um mês específico.
-
-OBS. SOBRE OS "SÍMBOLOS DOS BANCOS":
-As logomarcas oficiais de Itaú, Bradesco, Santander, Nubank etc. são marcas
-registradas de cada instituição, protegidas por direito de propriedade
-intelectual — não é possível reproduzir os logos reais aqui. Em vez disso,
-foi criado um selo estilizado (emoji colorido + sigla/nome do banco) só para
-facilitar a identificação visual dos cartões cadastrados, sem usar nenhuma
-marca oficial.
 """
 import pandas as pd
 
@@ -23,11 +15,6 @@ MESES_PT = {
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
 }
 
-# ---------------------------------------------------------------------------
-# Selos estilizados por banco (emoji + nome) — NÃO são as logomarcas oficiais,
-# apenas um selo colorido para diferenciar visualmente cada instituição.
-# 12 bancos/fintechs mais comuns no Brasil.
-# ---------------------------------------------------------------------------
 BANCOS_EMOJI = {
     "Itaú":               "🟠 Itaú",
     "Bradesco":           "🔴 Bradesco",
@@ -45,7 +32,6 @@ BANCOS_EMOJI = {
     "Outro":              "⚪ Outro",
 }
 
-
 def formatar_moeda(valor: float) -> str:
     """Formata um número no padrão monetário brasileiro: R$ 1.234,56"""
     if valor is None:
@@ -54,11 +40,11 @@ def formatar_moeda(valor: float) -> str:
     texto = texto.replace(",", "TEMP").replace(".", ",").replace("TEMP", ".")
     return f"R$ {texto}"
 
-
 def despesas_para_dataframe(despesas) -> pd.DataFrame:
+    # AQUI ESTÁ A CORREÇÃO: "caixa" e "responsavel" adicionados à lista
     cols = ["id", "data_compra", "data_competencia", "categoria_nome", "descricao",
             "valor", "forma_pagamento", "cartao_nome", "parcela_atual", "parcela_total",
-            "fixa", "compra_grupo"]
+            "fixa", "compra_grupo", "caixa", "responsavel"]
     if not despesas:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame([dict(d) for d in despesas])
@@ -67,9 +53,9 @@ def despesas_para_dataframe(despesas) -> pd.DataFrame:
             df[c] = None
     return df[cols]
 
-
 def receitas_para_dataframe(receitas) -> pd.DataFrame:
-    cols = ["id", "data", "origem", "valor", "observacao"]
+    # AQUI ESTÁ A CORREÇÃO: "caixa" adicionado à lista de receitas
+    cols = ["id", "data", "origem", "valor", "observacao", "caixa"]
     if not receitas:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame([dict(r) for r in receitas])
@@ -77,7 +63,6 @@ def receitas_para_dataframe(receitas) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = None
     return df[cols]
-
 
 def cartoes_para_dataframe(cartoes) -> pd.DataFrame:
     cols = ["id", "banco", "nome", "dia_fechamento", "dia_vencimento"]
@@ -89,15 +74,7 @@ def cartoes_para_dataframe(cartoes) -> pd.DataFrame:
             df[c] = None
     return df[cols]
 
-
 def calcular_resumo_mensal(requesting_user: dict, ano: int, mes: int) -> dict:
-    """
-    Calcula o balanço do mês para o usuário informado:
-    - Total de Receitas
-    - Total de Despesas (fixas + parcelas que caem na competência do mês)
-    - Valor destinado à Reserva (% configurado sobre as receitas do mês)
-    - Saldo Livre Líquido = Receitas - Despesas - Reserva
-    """
     receitas = db.list_receitas(requesting_user, ano, mes)
     despesas = db.list_despesas(requesting_user, ano, mes)
     total_receitas = sum(r["valor"] for r in receitas)
@@ -115,7 +92,6 @@ def calcular_resumo_mensal(requesting_user: dict, ano: int, mes: int) -> dict:
         "despesas": despesas,
     }
 
-
 def cor_status_teto(percentual: float) -> str:
     """Retorna uma cor (hex) de acordo com o percentual do teto de gastos atingido."""
     if percentual >= 100:
@@ -123,4 +99,4 @@ def cor_status_teto(percentual: float) -> str:
     elif percentual >= 80:
         return "#f39c12"   # laranja
     else:
-        return "#2ecc71"   # verde
+        return "#00FFAA"   # verde (ajustado para o novo tema)
