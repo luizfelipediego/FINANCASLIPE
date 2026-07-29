@@ -5,6 +5,7 @@ app.py
 Sistema de Gestão Financeira Pessoal e Familiar (com autenticação de usuário)
 """
 from datetime import date, datetime
+import calendar
 import io
 import json
 
@@ -78,9 +79,9 @@ st.sidebar.caption("Esse período é usado no Dashboard, Relatórios e Orçament
 
 st.markdown(
     """
-    <div style="background-color:#111111; color:#ffffff; padding:22px 28px; border-radius:10px; border:1px solid #2a2a2a; margin-bottom:18px;">
-        <div style="font-size:26px; font-weight:700; letter-spacing:0.5px;">💰 Finanças da Família</div>
-        <div style="font-size:14px; color:#bdbdbd; margin-top:4px;">Gestão financeira pessoal e familiar</div>
+    <div style="background-color:#1E212B; color:#ffffff; padding:22px 28px; border-radius:10px; border:1px solid #00FFAA; margin-bottom:18px;">
+        <div style="font-size:26px; font-weight:700; letter-spacing:0.5px;">💰 Inteligência Financeira</div>
+        <div style="font-size:14px; color:#bdbdbd; margin-top:4px;">Painel de Controle e Fluxo de Caixa</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -104,10 +105,35 @@ if pagina == "📊 Dashboard":
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total de Receitas", utils.formatar_moeda(resumo["total_receitas"]))
     col2.metric("Total de Despesas", utils.formatar_moeda(resumo["total_despesas"]))
-    col3.metric(f"Reserva ({resumo['percentual_reserva']:.1f}%)", utils.formatar_moeda(resumo["valor_reserva"]))
+    col3.metric(f"Reserva de Capital ({resumo['percentual_reserva']:.1f}%)", utils.formatar_moeda(resumo["valor_reserva"]))
     
-    delta_str = "- Atenção: negativo" if resumo["saldo_livre"] < 0 else None
+    delta_str = "- Atenção: negativo" if resumo["saldo_livre"] < 0 else "Saldo Saudável"
     col4.metric("Saldo Livre Líquido", utils.formatar_moeda(resumo["saldo_livre"]), delta=delta_str)
+
+    if st.button("🎉 Consolidar Resultado do Mês"):
+        if saldo_livre >= 0:
+            st.balloons()
+            st.success("Excelente! Você fechou o mês no azul e dentro do planejamento.")
+        else:
+            st.warning("O mês fechou negativo. Revise a seção de alertas de teto de gastos abaixo.")
+
+    st.markdown("---")
+    
+    # --- PAINEL EXCLUSIVO BTG PACTUAL ---
+    st.subheader("📈 Proventos e Renda Passiva (BTG Pactual / FIIs)")
+    st.caption("Evolução dos rendimentos que trabalham por você isolados do seu fluxo de caixa principal.")
+    df_rec = utils.receitas_para_dataframe(receitas_list)
+    if not df_rec.empty:
+        df_rend = df_rec[df_rec['origem'].str.contains('Rendimentos', case=False, na=False)]
+        if not df_rend.empty:
+            fig_rend = px.bar(df_rend, x='data', y='valor', text='valor', title="", color_discrete_sequence=['#00FFAA'])
+            fig_rend.update_traces(texttemplate='R$ %{text:.2f}', textposition='outside')
+            fig_rend.update_layout(xaxis_title="", yaxis_title="Rendimento Diário", margin=dict(t=10, b=0, l=0, r=0))
+            st.plotly_chart(fig_rend, width='stretch')
+        else:
+            st.info("Nenhum rendimento de FIIs ou Renda Fixa lançado neste mês.")
+    else:
+        st.info("Nenhum rendimento de FIIs ou Renda Fixa lançado neste mês.")
 
     st.markdown("---")
     col_a, col_b = st.columns(2)
@@ -116,7 +142,8 @@ if pagina == "📊 Dashboard":
         df_desp = utils.despesas_para_dataframe(resumo["despesas"])
         if not df_desp.empty:
             df_group = df_desp.groupby("categoria_nome", as_index=False)["valor"].sum()
-            fig = px.pie(df_group, names="categoria_nome", values="valor", hole=0.4)
+            fig = px.pie(df_group, names="categoria_nome", values="valor", hole=0.5, color_discrete_sequence=px.colors.sequential.Tealgrn)
+            fig.update_layout(margin=dict(t=10, b=0, l=0, r=0))
             st.plotly_chart(fig, width='stretch')
         else:
             st.info("Nenhuma despesa lançada nesta competência.")
@@ -124,7 +151,7 @@ if pagina == "📊 Dashboard":
     with col_b:
         st.subheader("Evolução Mensal do Saldo")
         historico = []
-        for i in range(11, -1, -1):
+        for i in range(5, -1, -1):
             d = db.add_months(date(ano_sel, mes_sel, 1), -i)
             garantir_fixas_geradas(user, d.year, d.month)
             r_receitas = db.list_receitas(user, ano=d.year, mes=d.month)
@@ -132,14 +159,20 @@ if pagina == "📊 Dashboard":
             total_r = sum(rr.get("valor", 0) for rr in r_receitas)
             total_d = sum(dd.get("valor", 0) for dd in r_despesas)
             perc = db.get_reserva_percentual()
-            historico.append({"mes": f"{utils.MESES_PT[d.month][:3]}/{str(d.year)[2:]}", "Saldo Livre": total_r - total_d - (total_r * perc / 100.0), "Receitas": total_r, "Despesas": total_d})
+            historico.append({"mes": f"{utils.MESES_PT[d.month][:3]}/{str(d.year)[2:]}", "Saldo Livre": total_r - total_d - (total_r * perc / 100.0)})
         df_hist = pd.DataFrame(historico)
-        fig2 = px.line(df_hist, x="mes", y=["Receitas", "Despesas", "Saldo Livre"], markers=True)
-        fig2.update_layout(legend_title_text="", xaxis_title="", yaxis_title="R$")
+        fig2 = px.area(df_hist, x="mes", y="Saldo Livre", markers=True, color_discrete_sequence=['#00FFAA'])
+        fig2.update_layout(xaxis_title="", yaxis_title="R$", margin=dict(t=10, b=0, l=0, r=0))
         st.plotly_chart(fig2, width='stretch')
 
     st.markdown("---")
-    st.subheader("🚦 Alertas de Teto de Gastos por Categoria")
+    st.subheader("🚦 Alertas Preditivos de Teto de Gastos")
+    
+    # Inteligência de Tempo do Mês
+    dias_no_mes = calendar.monthrange(ano_sel, mes_sel)[1]
+    dia_atual = HOJE.day if (ano_sel == HOJE.year and mes_sel == HOJE.month) else dias_no_mes
+    progresso_tempo = dia_atual / dias_no_mes
+
     categorias = db.list_categorias(user)
     df_desp_cat = utils.despesas_para_dataframe(resumo["despesas"])
     algum_teto_definido = False
@@ -150,12 +183,43 @@ if pagina == "📊 Dashboard":
         gasto = df_desp_cat.loc[df_desp_cat["categoria_nome"] == cat["nome"], "valor"].sum() if not df_desp_cat.empty else 0.0
         percentual = (gasto / cat["teto_mensal"]) * 100 if cat["teto_mensal"] else 0
         cor = utils.cor_status_teto(percentual)
+        
         st.markdown(f"**{cat['nome']}** — {utils.formatar_moeda(gasto)} de {utils.formatar_moeda(cat['teto_mensal'])} ({percentual:.0f}%)")
-        st.markdown(f'<div style="background-color:#e0e0e0; border-radius:6px; height:14px; width:100%;"><div style="background-color:{cor}; width:{min(percentual, 100)}%; height:14px; border-radius:6px;"></div></div>', unsafe_allow_html=True)
-        if percentual >= 100: st.error(f"⚠️ Teto de **{cat['nome']}** ultrapassado!")
-        elif percentual >= 80: st.warning(f"Atenção: **{cat['nome']}** já atingiu {percentual:.0f}% do teto.")
+        st.markdown(f'<div style="background-color:#262730; border-radius:6px; height:14px; width:100%;"><div style="background-color:{cor}; width:{min(percentual, 100)}%; height:14px; border-radius:6px;"></div></div>', unsafe_allow_html=True)
+        
+        # Alertas baseados no ritmo
+        if percentual >= 100: 
+            st.error(f"⚠️ Teto estourado para a categoria **{cat['nome']}**.")
+        elif (percentual / 100) > (progresso_tempo * 1.25): 
+            st.warning(f"Atenção: Ritmo acelerado! Você já consumiu {percentual:.0f}% do teto, mas o mês está apenas {progresso_tempo*100:.0f}% concluído. Segure os gastos.")
+        elif percentual >= 80: 
+            st.info(f"Fique de olho: Você está próximo de bater o limite para **{cat['nome']}**.")
         st.write("")
+        
     if not algum_teto_definido: st.info("Nenhum teto de gasto configurado ainda. Defina em '🏷️ Categorias e Orçamento'.")
+
+    st.markdown("---")
+    # --- PROJETO 18 ANOS ---
+    with st.container(border=True):
+        st.subheader("🚀 Fundo de Emancipação (Projeto 18 Anos)")
+        st.caption("Visão gamificada e de longo prazo: projete o efeito multiplicador dos juros compostos para o futuro da sua família.")
+        
+        c_sim1, c_sim2, c_sim3 = st.columns(3)
+        aporte_mensal = c_sim1.number_input("Aporte Mensal Simulado (R$)", value=500.0, step=50.0)
+        taxa_anual = c_sim2.number_input("Taxa de Juros Anual Esperada (%)", value=11.5, step=0.5)
+        anos_horizonte = c_sim3.number_input("Horizonte (Anos)", value=18, step=1)
+        
+        if anos_horizonte > 0:
+            taxa_mensal = (1 + (taxa_anual / 100)) ** (1/12) - 1
+            meses_totais = int(anos_horizonte * 12)
+            montante_final = aporte_mensal * (((1 + taxa_mensal) ** meses_totais - 1) / taxa_mensal) if taxa_mensal > 0 else aporte_mensal * meses_totais
+            juros_acumulados = montante_final - (aporte_mensal * meses_totais)
+            
+            c_res1, c_res2 = st.columns(2)
+            c_res1.metric(f"Patrimônio Estimado em {anos_horizonte} anos", utils.formatar_moeda(montante_final), delta=f"+ {utils.formatar_moeda(juros_acumulados)} em Juros Compostos", delta_color="normal")
+            
+            st.caption(f"Trilha do Projeto (Meta de {meses_totais} meses de disciplina financeira)")
+            st.progress(0.05) # Barra simulando o início do percurso
 
     st.markdown("---")
     st.subheader("📋 Acompanhamento de Compras")
@@ -170,6 +234,91 @@ if pagina == "📊 Dashboard":
     with tab_financ:
         lista_financ = db.list_compras_por_tipo(user, forma_pagamento="Financiamento")
         st.dataframe(tabela_compras_df(lista_financ), width='stretch', hide_index=True)
+
+    # --- NOVA ÁREA CENTRALIZADA DE EDIÇÃO NO DASHBOARD ---
+    st.markdown("---")
+    st.subheader("✏️ Editar ou Excluir Lançamentos")
+    st.caption("Acesse e modifique **QUALQUER** lançamento do seu histórico diretamente daqui. Você pode digitar para pesquisar pela descrição, data ou valor da parcela.")
+
+    todas_despesas = db.list_despesas(user)
+    
+    if todas_despesas:
+        opcoes_dict = {
+            f"Venc: {d['data_competencia']} | {d['descricao']} ({d['parcela_atual']}/{d['parcela_total']}) | R$ {d['valor']} | ID {d['id']}": d["id"]
+            for d in todas_despesas
+        }
+        
+        escolha = st.selectbox("Busque a despesa que deseja corrigir:", [None] + list(opcoes_dict.keys()))
+        
+        if escolha:
+            id_acao = opcoes_dict[escolha]
+            desp_edit = next((d for d in todas_despesas if d["id"] == id_acao), None)
+            
+            if desp_edit:
+                cartoes = db.list_cartoes(user)
+                nomes_categorias = {c["nome"]: c["id"] for c in categorias}
+                
+                def _rotulo_cartao(c):
+                    selo = utils.BANCOS_EMOJI.get(c.get("banco"), "") if c.get("banco") else ""
+                    return f"{selo} — {c['nome']}" if selo else c["nome"]
+                nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
+                
+                with st.container(border=True):
+                    st.markdown(f"### Ajustando: {desp_edit['descricao']}")
+                    
+                    with st.form("form_edit_dash"):
+                        e_c1, e_c2 = st.columns(2)
+                        edit_data_compra = e_c1.date_input("Data da Compra", value=datetime.strptime(desp_edit["data_compra"], "%Y-%m-%d").date())
+                        edit_data_venc = e_c2.date_input("Data de Vencimento", value=datetime.strptime(desp_edit["data_competencia"], "%Y-%m-%d").date())
+                        
+                        edit_desc = st.text_input("Descrição", value=desp_edit["descricao"])
+                        
+                        e_c3, e_c4 = st.columns(2)
+                        idx_cat = list(nomes_categorias.values()).index(desp_edit["categoria_id"]) if desp_edit["categoria_id"] in nomes_categorias.values() else 0
+                        edit_cat = e_c3.selectbox("Categoria", list(nomes_categorias.keys()), index=idx_cat)
+                        
+                        idx_forma = FORMAS_PAGAMENTO.index(desp_edit["forma_pagamento"]) if desp_edit["forma_pagamento"] in FORMAS_PAGAMENTO else 0
+                        edit_forma = e_c4.selectbox("Forma de Pagamento", FORMAS_PAGAMENTO, index=idx_forma)
+                        
+                        edit_cartao_nome = None
+                        if edit_forma in ("Cartão de Crédito", "Cartão de Débito"):
+                            idx_cartao = 0
+                            if desp_edit["cartao_id"] and desp_edit["cartao_id"] in nomes_cartoes.values():
+                                idx_cartao = list(nomes_cartoes.values()).index(desp_edit["cartao_id"])
+                            if nomes_cartoes:
+                                edit_cartao_nome = st.selectbox("Cartão", list(nomes_cartoes.keys()), index=idx_cartao)
+                            else:
+                                st.warning("Nenhum cartão cadastrado.")
+                                
+                        edit_valor = st.number_input("Valor da Parcela (R$)", min_value=0.0, step=10.0, format="%.2f", value=float(desp_edit["valor"]))
+                        
+                        salvar_edicao = st.form_submit_button("💾 Salvar Alterações da Parcela")
+                        
+                        if salvar_edicao:
+                            try:
+                                novo_cat_id = nomes_categorias.get(edit_cat)
+                                novo_cartao_id = nomes_cartoes.get(edit_cartao_nome) if edit_cartao_nome else None
+                                db.edit_despesa(id_acao, edit_data_compra.isoformat(), edit_data_venc.isoformat(), novo_cat_id, edit_desc, edit_valor, edit_forma, novo_cartao_id, user)
+                                st.success("Lançamento atualizado com sucesso!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao editar: {e}")
+                                
+                    st.markdown("**🗑️ Opções de Exclusão Rápida:**")
+                    col_del1, col_del2 = st.columns(2)
+                    if col_del1.button("🗑️ Apagar APENAS esta parcela", key="del_one"):
+                        try:
+                            db.delete_despesa(id_acao, user)
+                            st.success("Parcela excluída.")
+                            st.rerun()
+                        except PermissionError as e: st.error(str(e))
+                    
+                    if col_del2.button("⚠️ Apagar TODAS as parcelas desta compra", key="del_all"):
+                        try:
+                            db.delete_grupo(desp_edit["compra_grupo"], user)
+                            st.success("Todas as parcelas da compra foram apagadas permanentemente.")
+                            st.rerun()
+                        except PermissionError as e: st.error(str(e))
 
 elif pagina == "📥 Receitas":
     st.title("📥 Receitas (Entradas)")
@@ -208,7 +357,7 @@ elif pagina == "📥 Receitas":
 
 elif pagina == "📤 Despesas":
     st.title("📤 Despesas (Saídas)")
-    st.caption("Tudo o que você lançar aqui — seja uma despesa avulsa, uma despesa fixa gerada automaticamente ou uma compra no cartão — soma no mesmo total de despesas do Dashboard e dos Relatórios. Nada disso muda entre as abas abaixo.")
+    st.caption("Aviso: A edição das despesas agora é feita de forma centralizada e ágil na página '📊 Dashboard'.")
 
     tab_lancar, tab_fixas, tab_cartoes = st.tabs(["📝 Lançar Despesa", "🔁 Despesas Fixas", "💳 Cartões"])
 
@@ -222,7 +371,6 @@ elif pagina == "📤 Despesas":
             return f"{selo} — {c['nome']}" if selo else c["nome"]
         nomes_cartoes = {_rotulo_cartao(c): c["id"] for c in cartoes}
 
-        # --- LANÇAR DESPESAS (SEM FORMULÁRIO PARA REAÇÃO IMEDIATA) ---
         with st.container(border=True):
             st.subheader("Nova Despesa")
             c1, c2 = st.columns(2)
@@ -244,7 +392,6 @@ elif pagina == "📤 Despesas":
             parcelas = 1
             data_vencimento = data_compra
             
-            # Aqui a tela responde instantaneamente à escolha da forma de pagamento
             if forma_pagamento in ("Cartão de Crédito", "Financiamento"):
                 max_parcelas = 48 if forma_pagamento == "Cartão de Crédito" else 420
                 parcelas = c6.number_input("Quantidade de parcelas", min_value=1, max_value=max_parcelas, value=1, step=1, key="nova_parc")
@@ -289,11 +436,9 @@ elif pagina == "📤 Despesas":
             df_show.columns = ["ID", "Vencimento", "Categoria", "Descrição", "Valor", "Pagamento", "Cartão", "Parcela"]
             st.dataframe(df_show, width='stretch', hide_index=True)
 
-            # --- EDIÇÃO DIRETA NO MÊS CORRENTE ---
+            # --- EDIÇÃO RÁPIDA DO MÊS ---
             st.markdown("---")
             st.subheader("✏️ Editar ou Excluir Lançamentos do Mês")
-            st.caption("Selecione o ID na tabela acima para alterar QUALQUER dado ou excluir a parcela.")
-            
             id_acao = st.selectbox("Selecione o ID para editar:", [None] + df["id"].tolist(), key="sel_id_acao")
             
             if id_acao:
@@ -341,7 +486,7 @@ elif pagina == "📤 Despesas":
                                 
                         st.markdown("**🗑️ Opções de Exclusão Rápida:**")
                         col_del1, col_del2 = st.columns(2)
-                        if col_del1.button("🗑️ Apagar APENAS esta parcela", key="del_one"):
+                        if col_del1.button("🗑️ Apagar APENAS esta parcela", key="del_one_mes"):
                             try:
                                 db.delete_despesa(id_acao, user)
                                 st.success("Parcela excluída.")
@@ -349,7 +494,7 @@ elif pagina == "📤 Despesas":
                             except PermissionError as e: st.error(str(e))
                         
                         if desp_edit["parcela_total"] > 1:
-                            if col_del2.button("⚠️ Apagar TODAS as parcelas desta compra", key="del_all"):
+                            if col_del2.button("⚠️ Apagar TODAS as parcelas desta compra", key="del_all_mes"):
                                 try:
                                     db.delete_grupo(desp_edit["compra_grupo"], user)
                                     st.success("Todas as parcelas da compra foram apagadas permanentemente.")
@@ -455,26 +600,6 @@ elif pagina == "📤 Despesas":
                 except (PermissionError, db.RegistroVinculadoError) as e: st.error(str(e))
             st.info("📌 **Regra de fechamento:** compras feitas *após* o dia de fechamento têm a 1ª parcela lançada automaticamente na fatura (competência) do **mês seguinte**.")
 
-        st.markdown("---")
-        st.subheader("🧾 Parcelamentos em Andamento")
-        parcelamentos = db.list_parcelamentos(user)
-        if not parcelamentos: st.info("Nenhuma compra parcelada no cartão até o momento.")
-        else:
-            for p in parcelamentos:
-                titulo = f"{p['descricao']} — {p['cartao_nome'] or 'sem cartão'}"
-                if p["concluido"]: titulo += " ✅ (quitada)"
-                with st.container(border=True):
-                    st.markdown(f"**{titulo}**")
-                    colx, coly, colz, colw = st.columns(4)
-                    colx.metric("Valor total da compra", utils.formatar_moeda(p["valor_total"]))
-                    coly.metric("Valor da parcela", utils.formatar_moeda(p["valor_parcela"]))
-                    colz.metric("Parcelas pagas", f"{p['parcelas_pagas']} / {p['parcela_total']}")
-                    colw.metric("Parcelas restantes", p["parcelas_restantes"])
-                    progresso = p["parcelas_pagas"] / p["parcela_total"] if p["parcela_total"] else 0
-                    st.progress(min(max(progresso, 0.0), 1.0))
-                    if not p["concluido"]: st.caption(f"Faltam {utils.formatar_moeda(p['valor_restante'])} para quitar essa compra ({p['parcelas_restantes']} parcela(s) de {utils.formatar_moeda(p['valor_parcela'])}).")
-                    else: st.caption("Compra totalmente quitada. 🎉")
-
 elif pagina == "🏷️ Categorias e Orçamento":
     st.title("🏷️ Categorias de Despesa e Teto de Gastos")
     with st.form("form_categoria", clear_on_submit=True):
@@ -514,6 +639,21 @@ elif pagina == "🏷️ Categorias e Orçamento":
 
 elif pagina == "📁 Relatórios e Exportação":
     st.title("📁 Relatórios, Filtros e Exportação")
+    
+    st.markdown("""
+        <style>
+        @media print {
+            .css-18ni7ap { display: none !important; }
+            header { display: none !important; }
+            .stButton { display: none !important; }
+            .stRadio { display: none !important; }
+        }
+        </style>
+        <button onclick="window.print()" style="padding:10px 15px; border-radius:5px; background-color:#00FFAA; color:#111; font-weight:bold; border:none; cursor:pointer; width:100%; margin-bottom: 20px;">
+            🖨️ Imprimir / Salvar Extrato em PDF
+        </button>
+    """, unsafe_allow_html=True)
+    
     modo = st.radio("Visualizar por período:", ["Mensal", "Diário (dentro do mês)", "Anual"], horizontal=True)
 
     if modo == "Anual":
@@ -534,13 +674,13 @@ elif pagina == "📁 Relatórios e Exportação":
             df_d = df_d[df_d["data_compra"] == dia_filtro.isoformat()]
             df_r = df_r[df_r["data"] == dia_filtro.isoformat()] if not df_r.empty else df_r
 
-    st.subheader("📥 Receitas")
+    st.subheader("📥 Receitas Consolidadas")
     st.dataframe(df_r, width='stretch', hide_index=True)
-    st.subheader("📤 Despesas")
+    st.subheader("📤 Despesas Consolidadas")
     st.dataframe(df_d, width='stretch', hide_index=True)
 
     st.markdown("---")
-    st.subheader("⬇️ Exportar dados")
+    st.subheader("⬇️ Exportar dados Brutos")
     col1, col2 = st.columns(2)
     with col1:
         csv_buffer = io.StringIO()
