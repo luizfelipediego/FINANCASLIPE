@@ -309,23 +309,49 @@ if pagina == "📊 Dashboard":
     st.caption("Visão geral de todos os parcelamentos e financiamentos em andamento.")
     tab_vista, tab_parcelado, tab_financ = st.tabs(["💳 À Vista no Cartão", "📦 Parcelado no Cartão", "🏦 Financiamentos"])
     
+    lista_vista = db.list_compras_por_tipo(user, forma_pagamento="Cartão de Crédito", somente_parceladas=False)
+    lista_parcelado = db.list_compras_por_tipo(user, forma_pagamento="Cartão de Crédito", somente_parceladas=True)
+    lista_financ = db.list_compras_por_tipo(user, forma_pagamento="Financiamento")
+
+    if filtro_caixa != "Consolidado": 
+        lista_vista = [x for x in lista_vista if x.get('caixa', 'PF (Pessoal)') == filtro_caixa]
+        lista_parcelado = [x for x in lista_parcelado if x.get('caixa', 'PF (Pessoal)') == filtro_caixa]
+        lista_financ = [x for x in lista_financ if x.get('caixa', 'PF (Pessoal)') == filtro_caixa]
+
     with tab_vista:
-        lista_vista = db.list_compras_por_tipo(user, forma_pagamento="Cartão de Crédito", somente_parceladas=False)
-        if filtro_caixa != "Consolidado": lista_vista = [x for x in lista_vista if x.get('caixa', 'PF (Pessoal)') == filtro_caixa]
         st.dataframe(tabela_compras_df(lista_vista), width='stretch', hide_index=True)
     with tab_parcelado:
-        lista_parcelado = db.list_compras_por_tipo(user, forma_pagamento="Cartão de Crédito", somente_parceladas=True)
-        if filtro_caixa != "Consolidado": lista_parcelado = [x for x in lista_parcelado if x.get('caixa', 'PF (Pessoal)') == filtro_caixa]
         st.dataframe(tabela_compras_df(lista_parcelado), width='stretch', hide_index=True)
     with tab_financ:
-        lista_financ = db.list_compras_por_tipo(user, forma_pagamento="Financiamento")
-        if filtro_caixa != "Consolidado": lista_financ = [x for x in lista_financ if x.get('caixa', 'PF (Pessoal)') == filtro_caixa]
         st.dataframe(tabela_compras_df(lista_financ), width='stretch', hide_index=True)
+
+    # --- NOVA ÁREA: GERENCIAMENTO RÁPIDO DO GRUPO DE COMPRAS ---
+    todas_compras_agrupadas = lista_vista + lista_parcelado + lista_financ
+    if todas_compras_agrupadas:
+        st.write("")
+        with st.container(border=True):
+            st.markdown("#### 🛠️ Gerenciamento Rápido (Excluir Compras)")
+            st.caption("Selecione uma compra da lista acima para destruir o histórico e apagar **TODAS** as suas parcelas de uma só vez (Ideal para consertar erros de lançamento como os da Moto).")
+            
+            opcoes_grp = {f"[{c['forma_pagamento']}] {c['descricao']} | Total: {utils.formatar_moeda(c['valor_total'])} | {c['parcela_total']}x": c['compra_grupo'] for c in todas_compras_agrupadas}
+            sel_grp = st.selectbox("Selecione a compra que deseja excluir:", [None] + list(opcoes_grp.keys()), key="sel_grp_dash")
+            
+            if sel_grp:
+                grp_id = opcoes_grp[sel_grp]
+                col_act1, col_act2 = st.columns([1, 2])
+                if col_act1.button("🗑️ Excluir TODAS as parcelas", type="primary", key="btn_del_grp"):
+                    try:
+                        db.delete_grupo(grp_id, user)
+                        st.success("Compra e todas as suas parcelas foram apagadas permanentemente!")
+                        st.rerun()
+                    except PermissionError as e: 
+                        st.error(str(e))
+                col_act2.info("💡 Dica: Se errou o valor ou as parcelas na hora de registrar, basta excluir a compra inteira aqui e lançar novamente na aba Despesas.")
 
     st.markdown("---")
     st.markdown("<div id='ancora-edicao'></div>", unsafe_allow_html=True)
-    st.subheader("✏️ Editar ou Excluir Lançamentos")
-    st.caption("Acesse e modifique **QUALQUER** lançamento do seu histórico diretamente daqui.")
+    st.subheader("✏️ Editor Avançado de Parcelas")
+    st.caption("Acesse e modifique dados específicos de QUALQUER lançamento isolado do seu histórico (Ex: Se um mês você pagou com juros).")
 
     todas_despesas = db.list_despesas(user)
     
@@ -335,7 +361,7 @@ if pagina == "📊 Dashboard":
             for d in todas_despesas
         }
         
-        escolha = st.selectbox("Busque a despesa que deseja corrigir:", [None] + list(opcoes_dict.keys()))
+        escolha = st.selectbox("Busque a parcela que deseja corrigir:", [None] + list(opcoes_dict.keys()))
         
         if escolha:
             id_acao = opcoes_dict[escolha]
@@ -398,22 +424,13 @@ if pagina == "📊 Dashboard":
                             except Exception as e:
                                 st.error(f"Erro ao editar: {e}")
                                 
-                    st.markdown("**🗑️ Opções de Exclusão Rápida:**")
-                    col_del1, col_del2 = st.columns(2)
-                    if col_del1.button("🗑️ Apagar APENAS esta parcela", key="del_one"):
+                    st.markdown("**🗑️ Exclusão Singular:**")
+                    if st.button("🗑️ Apagar APENAS esta parcela", key="del_one"):
                         try:
                             db.delete_despesa(id_acao, user)
                             st.success("Parcela excluída.")
                             st.rerun()
                         except PermissionError as e: st.error(str(e))
-                    
-                    if desp_edit["parcela_total"] > 1:
-                        if col_del2.button("⚠️ Apagar TODAS as parcelas desta compra", key="del_all"):
-                            try:
-                                db.delete_grupo(desp_edit["compra_grupo"], user)
-                                st.success("Todas as parcelas da compra foram apagadas permanentemente.")
-                                st.rerun()
-                            except PermissionError as e: st.error(str(e))
 
 elif pagina == "📥 Receitas":
     st.title("📥 Receitas (Entradas)")
